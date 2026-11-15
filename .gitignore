@@ -1,0 +1,22 @@
+# Build output
+build/
+installer/Output/
+
+# Game executables and anything derived from the game (never published)
+original/
+patched/
+*.exe
+*.dll
+*.lib
+*.exp
+*.obj
+*.pdb
+*.ilk
+
+# Logs and files the game or the mod writes at runtime
+*.log
+/music/
+
+# Python
+__pycache__/
+*.pyc
