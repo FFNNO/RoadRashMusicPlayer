@@ -2,16 +2,19 @@
 ; Build with installer\build.bat (builds dsound.dll first) or:
 ;   ISCC.exe [/DAppVersion=x.y.z] installer\RoadRashMusicPlayer.iss
 ; Silent install example:
-;   RoadRashMusicPlayer-Setup-0.1.0.exe /VERYSILENT /CURRENTUSER /DIR="C:\...\RoadRash"
+;   RoadRashMusicPlayer-Setup-0.1.1.exe /VERYSILENT /CURRENTUSER /DIR="C:\...\RoadRash"
+;   add /TASKS="othermodscompat" to opt in to the experimental other mods mode on a fresh ini.
 ; It installs dsound.dll, adds rr95music.ini only when the game folder has none, and creates the
-; music folder. A dsound.dll that is not ours (its version resource does not name this product) is
+; music folder. The optional, unchecked task "othermodscompat" sets OtherModsCompat=1 (experimental)
+; only in an rr95music.ini this install created; an existing ini is never changed. A dsound.dll that
+; is not ours (its version resource does not name this product) is
 ; always kept as dsound.dll.bak-before-musicplayer, or under that name plus the date and time when a
 ; backup of that name already exists, so no backup is ever replaced. The name of the backup this
 ; install made is recorded in dsound.dll.musicplayer-backup, and uninstall restores only that one.
 ; Uninstall never removes rr95music.ini, rr95music.log or the music folder.
 
 #ifndef AppVersion
-  #define AppVersion "0.1.0"
+  #define AppVersion "0.1.1"
 #endif
 #define AppName "Road Rash Music Player"
 #define AppURL "https://github.com/FFNNO/RoadRashMusicPlayer"
@@ -70,7 +73,13 @@ spanish.ForeignDsoundCancelled=Se canceló la instalación. El dsound.dll existe
 english.BackupFailed=Could not back up %1. Close the game and try again.
 spanish.BackupFailed=No se pudo hacer copia de seguridad de %1. Cierra el juego y vuelve a intentarlo.
 english.LaunchGame=Launch Road Rash 95 (Steam)
+english.OtherModsTask=Experimental: work alongside other mods (OtherModsCompat=1, only for a new rr95music.ini)
 spanish.LaunchGame=Iniciar Road Rash 95 (Steam)
+spanish.OtherModsTask=Experimental: funcionar junto a otros mods (OtherModsCompat=1, solo para un rr95music.ini nuevo)
+
+[Tasks]
+; Experimental and off by default. It only changes an rr95music.ini this install created.
+Name: "othermodscompat"; Description: "{cm:OtherModsTask}"; Flags: unchecked
 
 [Files]
 Source: "..\build\Release\dsound.dll"; DestDir: "{app}"; Flags: ignoreversion
@@ -95,6 +104,12 @@ const
   BackupStateName = 'dsound.dll.musicplayer-backup';
   { Our dsound.dll names this product in its version resource (src/dsound.rc). }
   OurProductName = 'Road Rash Music Player';
+  IniName = 'rr95music.ini';
+  OtherModsTask = 'othermodscompat';
+
+var
+  { True when the game folder had no rr95music.ini before this install. }
+  IniWasMissing: Boolean;
 
 { ---------- helpers ---------- }
 
@@ -257,6 +272,8 @@ begin
     Exit;
   end;
 
+  IniWasMissing := not FileExists(AddBackslash(App) + IniName);
+
   Dll := AddBackslash(App) + DsoundName;
   { Decided by content only, never by the uninstall entry or an existing backup: a dsound.dll whose
     version resource does not name this product is another program's file and is always kept. }
@@ -282,6 +299,37 @@ begin
     end;
     Log(Format('Backup %s -> %s', [Dll, BackupName]));
   end;
+end;
+
+{ The experimental task turns OtherModsCompat on only in the template this install just added:
+  the one line "OtherModsCompat=0" becomes "OtherModsCompat=1" and nothing else changes. A player's
+  own rr95music.ini is never touched. }
+procedure EnableOtherModsCompat(Ini: String);
+var
+  Data: AnsiString;
+  Text: String;
+begin
+  if not LoadStringFromFile(Ini, Data) then
+  begin
+    Log('Cannot read ' + Ini + '; OtherModsCompat is left at 0');
+    Exit;
+  end;
+  Text := String(Data);
+  if StringChangeEx(Text, #10 + 'OtherModsCompat=0', #10 + 'OtherModsCompat=1', True) <> 1 then
+  begin
+    Log('No single OtherModsCompat=0 line in ' + Ini + '; it is left unchanged');
+    Exit;
+  end;
+  if SaveStringToFile(Ini, AnsiString(Text), False) then
+    Log('Experimental OtherModsCompat=1 written to ' + Ini)
+  else
+    Log('Cannot write ' + Ini + '; OtherModsCompat is left at 0');
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if (CurStep = ssPostInstall) and IniWasMissing and WizardIsTaskSelected(OtherModsTask) then
+    EnableOtherModsCompat(AddBackslash(NormalizeDir(WizardDirValue)) + IniName);
 end;
 
 { Interactive checks; PrepareToInstall repeats them so silent installs fail too. }

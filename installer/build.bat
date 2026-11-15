@@ -3,7 +3,7 @@ rem Builds build\Release\dsound.dll and the installer
 rem installer\Output\RoadRashMusicPlayer-Setup-<version>.exe.
 rem ISCC lookup: %ISCC% (override), then %LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe,
 rem then %ProgramFiles(x86)%\Inno Setup 6\ISCC.exe.
-rem Optional: set APPVERSION=x.y.z to override the default AppVersion (0.1.0).
+rem Optional: set APPVERSION=x.y.z to override the default AppVersion (0.1.1).
 setlocal
 
 for %%I in ("%~dp0..") do set "ROOT=%%~fI"

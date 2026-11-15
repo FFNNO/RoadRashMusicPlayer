@@ -24,7 +24,7 @@ Es un `dsound.dll` proxy: se ubica junto a `RoadRash95.exe`, reenvía cada llama
 - [El beeper](#el-beeper)
 - [Configuración: rr95music.ini](#configuración-rr95musicini)
 - [Valores del registro](#valores-del-registro)
-- [Con y sin el mod general](#con-y-sin-el-mod-general)
+- [Uso junto a otros mods](#uso-junto-a-otros-mods)
 - [Desinstalación](#desinstalación)
 - [Solución de problemas](#solución-de-problemas)
 - [Limitaciones conocidas](#limitaciones-conocidas)
@@ -35,7 +35,7 @@ Es un `dsound.dll` proxy: se ubica junto a `RoadRash95.exe`, reenvía cada llama
 
 - Windows 10 u 11.
 - **Road Rash 95 en Steam** (30th Anniversary Edition, app 2448570).
-- Opcional: el mod general **Road Rash FFNNO Patch** (<https://github.com/FFNNO/RoadRashFFNNOPatch>), un `ddraw.dll` proxy con renderizado por GPU, pantalla ancha y más. El reproductor funciona sin él. **Para usar ambos a la vez, el mod general debe ser v0.1.4 o posterior.**
+- Ningún otro mod. El reproductor funciona de forma independiente, y esa es la configuración recomendada. Usarlo junto a otros mods que modifican las mismas rutinas del juego, como **Road Rash FFNNO Patch** (<https://github.com/FFNNO/RoadRashFFNNOPatch>), es experimental: ver [Uso junto a otros mods](#uso-junto-a-otros-mods).
 
 ## Instalación
 
@@ -43,11 +43,11 @@ Es un `dsound.dll` proxy: se ubica junto a `RoadRash95.exe`, reenvía cada llama
 
 1. Descargar `RoadRashMusicPlayer-Setup-<versión>.exe` desde la [última versión publicada](https://github.com/FFNNO/RoadRashMusicPlayer/releases/latest). Cada versión se compila con GitHub Actions a partir del commit etiquetado e indica el SHA-256 de cada archivo.
 2. Cerrar el juego y ejecutar el instalador. Encuentra la carpeta del juego a partir del registro o de las bibliotecas de Steam, y solo continúa si `RoadRash95.exe` está en la carpeta elegida. Si no puede escribir allí, debe ejecutarse como administrador.
-3. Instala `dsound.dll`, agrega `rr95music.ini` solo si la carpeta no tiene uno (la configuración existente nunca se sobrescribe) y crea la carpeta `music`.
+3. Instala `dsound.dll`, agrega `rr95music.ini` solo si la carpeta no tiene uno (la configuración existente nunca se sobrescribe) y crea la carpeta `music`. La tarea sin marcar "Experimental: funcionar junto a otros mods" escribe `OtherModsCompat=1` solo en ese `rr95music.ini` nuevo; para el modo independiente debe quedar sin marcar.
 
 Si la carpeta del juego ya tiene un `dsound.dll` de otro mod, el instalador lo advierte, guarda ese archivo como `dsound.dll.bak-before-musicplayer` (o con ese nombre más la fecha y la hora, si ya existe una copia con ese nombre) y lo restaura al desinstalar. Nunca se sobrescribe una copia de seguridad.
 
-Instalación silenciosa: `RoadRashMusicPlayer-Setup-0.1.0.exe /VERYSILENT /CURRENTUSER /DIR="<carpeta del juego>"`.
+Instalación silenciosa: `RoadRashMusicPlayer-Setup-0.1.1.exe /VERYSILENT /CURRENTUSER /DIR="<carpeta del juego>"`. Con `/TASKS="othermodscompat"` se selecciona la tarea experimental.
 
 ### Manual
 
@@ -125,7 +125,8 @@ La tecla del beeper (`Home`) muestra u oculta el panel solo en la carrera actual
 
 | Clave | Predeterminado | Función |
 |---|---|---|
-| `Enabled` | `1` | `1` = cargar el reproductor. `0` = solo reenviar las llamadas de DirectSound: sin hooks ni llamadas a la API del mod. |
+| `Enabled` | `1` | `1` = cargar el reproductor. `0` = solo reenviar las llamadas de DirectSound: sin hooks. |
+| `OtherModsCompat` | `0` | **Experimental.** `0` = modo independiente (recomendado). `1` = encadenarse a los hooks que otros mods ya instalaron en las mismas rutinas del juego; ver [Uso junto a otros mods](#uso-junto-a-otros-mods). |
 | `LogLevel` | `info` | `debug`, `info`, `warn` o `error`; cualquier otro valor usa `info`. |
 | `Path` | `music` | Carpeta de casetes, relativa a la carpeta del juego o absoluta. Se crea al iniciar si no existe. |
 | `Shuffle` | `0` | `1` = orden aleatorio de las pistas de cada casete; `0` = orden por nombre. |
@@ -148,17 +149,27 @@ El reproductor guarda las elecciones hechas en el juego en `HKCU\SOFTWARE\Electr
 | `ModMusicKeys` | `REG_BINARY` | versión 1 más un byte de código de tecla virtual por acción |
 | `ModMusicOverlay` | `REG_BINARY` | un byte: `1` = fijo, `0` = a demanda |
 
-## Con y sin el mod general
+## Uso junto a otros mods
 
-**Con Road Rash FFNNO Patch v0.1.4 o posterior**, el reproductor se conecta a través de su API de mods (`RR95_GetModApi`) en lugar de modificar el código del juego que controla el mod general. El mod general dibuja el beeper con su renderizador y muestra la fila `Reproductor` en su menú de gráficos reubicado, junto a sus propias filas de pantalla ancha y vista lejana. El reproductor registra la fila muy temprano, antes de que el mod general construya ese menú.
+### Modo independiente (predeterminado, recomendado)
 
-**Sin el mod general**, el reproductor instala sus propios hooks en las mismas rutinas del juego, cada uno solo después de verificar los bytes originales del juego. Escribe la fila `Reproductor` en el menú de gráficos del propio juego (en una posición sin uso) y mezcla el beeper con la imagen del juego. Todo funciona de la misma manera.
+**El modo independiente es el modo predeterminado y estable, y es la configuración recomendada.** El reproductor instala sus propios hooks en las rutinas del juego que necesita, cada uno solo después de verificar los bytes originales del juego: la presentación de la carrera y del menú, el texto de los elementos del menú, la pausa y reanudación de la música nativa, el inicio de la música de carrera y la entrada del menú que usa la captura de teclas. Escribe la fila `Reproductor` en el menú de gráficos del propio juego (en una posición sin uso) y mezcla el beeper con la imagen del juego. No necesita ningún otro mod.
 
-**Con un mod general anterior** (previo a v0.1.4, sin API de mods), ambas DLL necesitarían las mismas rutinas del juego. El reproductor no modifica código que ya está modificado, por lo que parte de sus funciones quedan desactivadas. Se recomienda actualizar el mod general.
+Si otro mod ya modificó una de esas rutinas, los bytes originales ya no están, así que el reproductor no toca esa rutina y la parte del reproductor que la necesita queda desactivada. Por ejemplo, junto a Road Rash FFNNO Patch v0.1.3 el reproductor queda en silencio, porque ese mod ya modifica la presentación de la carrera, la del menú y el texto de los elementos del menú.
 
-El reproductor siempre modifica cuatro rutinas propias (la pausa y reanudación de la música nativa, el inicio de la música de carrera y la entrada del menú que usa la captura de teclas), cada una solo después de verificar sus bytes originales.
+### Experimental: `OtherModsCompat=1`
 
-El contrato de la API entre ambos mods es [`include/rr95_mod_api.h`](include/rr95_mod_api.h). **Ese archivo pertenece al mod general** (Road Rash FFNNO Patch, `renderer/src/rr95_mod_api.h`) y se copia aquí byte por byte; cualquier cambio debe hacerse primero allí.
+`OtherModsCompat=1` en `rr95music.ini` activa un modo **experimental** que encadena el reproductor a los hooks que otros mods ya instalaron. Si una rutina empieza con un salto de otro mod hacia su propio código, el reproductor coloca su propio salto delante: primero se ejecuta la parte del reproductor y después el código del otro mod, que sigue llegando al código original del juego. Una rutina modificada de cualquier otra forma no se toca. El instalador puede escribir este valor en un `rr95music.ini` nuevo con la tarea sin marcar "Experimental: funcionar junto a otros mods".
+
+- **Probado con Road Rash FFNNO Patch v0.1.3.** Se espera que funcionen la música y las teclas rápidas. El beeper y la fila `Reproductor` pueden no estar disponibles junto a un mod de GPU: si el otro mod dibuja el juego por su cuenta (por ejemplo con Direct3D), el beeper no puede dibujarse, y si mueve el menú de gráficos, la fila se omite. `rr95music.log` lo indica una vez. No se probaron otros mods ni otras versiones.
+- **Riesgos:** depende de cómo el otro mod mantiene sus hooks. Si ese mod los quita o los cambia, el reproductor puede perder esos hooks: los revisa una vez por segundo, registra una sola vez cada hook perdido y deja de usarlo, sin volver a instalarlo. Es posible que el juego se cierre de forma inesperada.
+- **Desactivarlo:** escribir `OtherModsCompat=0` en `rr95music.ini` (o borrar la línea) y reiniciar el juego.
+
+### El `dsound.dll` de otro mod
+
+Solo puede haber un archivo llamado `dsound.dll` en la carpeta del juego, así que un mod que también es un `dsound.dll` entra en conflicto con el reproductor por el nombre del archivo, en cualquiera de los dos modos. El instalador guarda ese archivo aparte y lo restaura al desinstalar (ver [Instalación](#instalación)).
+
+[`include/rr95_mod_api.h`](include/rr95_mod_api.h) es una interfaz interna sin uso: el código de enlace inactivo del reproductor todavía se compila con ella, pero el reproductor nunca se conecta a través de ella.
 
 ## Desinstalación
 
@@ -169,7 +180,9 @@ En ambos casos se conservan la carpeta `music`, `rr95music.ini`, `rr95music.log`
 
 ## Solución de problemas
 
-- **No ocurre nada en el juego:** abrir `rr95music.log` en la carpeta del juego. Indica si el reproductor se cargó, si encontró el mod general, qué hooks instaló y qué casetes leyó. Una línea sobre una versión desconocida del ejecutable significa que el ejecutable del juego cambió: en ese caso el reproductor solo reenvía las llamadas de DirectSound. Con `LogLevel=debug` se obtiene más detalle.
+- **No ocurre nada en el juego:** abrir `rr95music.log` en la carpeta del juego. Indica si el reproductor se cargó, el valor de `OtherModsCompat`, qué hooks instaló, encadenó o rechazó, y qué casetes leyó. Una línea sobre una versión desconocida del ejecutable significa que el ejecutable del juego cambió: en ese caso el reproductor solo reenvía las llamadas de DirectSound. Con `LogLevel=debug` se obtiene más detalle.
+- **El reproductor queda en silencio junto a otro mod:** el registro muestra un `byte mismatch` por cada rutina que ese mod ya modificó. El modo independiente no toca esas rutinas. Se puede probar el modo experimental `OtherModsCompat=1` (ver [Uso junto a otros mods](#uso-junto-a-otros-mods)) o usar el reproductor sin el otro mod.
+- **Algo falla con `OtherModsCompat=1`:** escribir `OtherModsCompat=0`, reiniciar el juego e informar el problema adjuntando `rr95music.log`.
 - **No suena la música de la carpeta:** revisar `Path` y los formatos de archivo. Cada subcarpeta de primer nivel de `music\` es un casete; los archivos de carpetas más profundas pertenecen a su casete de primer nivel, y un casete sin archivos admitidos se omite.
 - **Otro mod también usa `dsound.dll`:** solo puede haber un archivo con ese nombre en la carpeta del juego, así que solo uno de los dos mods puede estar activo. El instalador guarda el otro archivo como `dsound.dll.bak-before-musicplayer` (más la fecha y la hora si ese nombre ya está en uso); al desinstalar el reproductor se recupera, o pueden intercambiarse los archivos a mano.
 - **Una tecla rápida no funciona:** puede coincidir con la `ToggleKey` del mod general o con `F11`, lo que la desactiva; el registro lo indica. Conviene elegir otra tecla.
@@ -180,7 +193,8 @@ En ambos casos se conservan la carpeta `music`, `rr95music.ini`, `rr95music.log`
 - **`ModMusicKeys` guarda solo teclas simples.** Una asignación con `Ctrl`, `Shift` o `Alt` definida en el ini conserva sus modificadores solo durante la sesión actual; el siguiente inicio lee la tecla simple del registro.
 - **Es incompatible con cualquier otro mod que también sea un `dsound.dll`.** Solo puede haber uno instalado a la vez.
 - **Necesita el ejecutable de Steam que conoce.** Con otra versión del ejecutable, el reproductor queda desactivado y solo reenvía las llamadas de DirectSound.
-- **Es una primera versión pública de prueba (v0.1.0).** Los problemas pueden informarse adjuntando `rr95music.log`.
+- **`OtherModsCompat=1` es experimental.** Solo se probó con Road Rash FFNNO Patch v0.1.3, y junto a un mod de GPU el beeper y la fila `Reproductor` pueden no estar disponibles.
+- **Es una versión pública de prueba temprana (v0.1.1).** Los problemas pueden informarse adjuntando `rr95music.log`.
 
 ## Compilación desde el código fuente
 
@@ -207,7 +221,7 @@ python -I installer\tests\test_installer.py
 | Ruta | Contenido |
 |---|---|
 | `src/` | el reproductor (C++17); `src/shared/` contiene el motor de hooks, el registro y la verificación del ejecutable compartidos con el mod general |
-| `include/rr95_mod_api.h` | el contrato de la API de mods, propiedad del mod general |
+| `include/rr95_mod_api.h` | una interfaz interna sin uso; el código de enlace inactivo se compila con ella |
 | `third_party/` | dr_libs y stb_vorbis, incluidos sin modificaciones |
 | `tests/music_test.cpp` | pruebas unitarias |
 | `tools/check_hook_sites.py` | verificador de puntos de hook |

@@ -38,6 +38,9 @@ MUSIC = "music"
 BACKUP_SUFFIX = ".bak-before-musicplayer"
 BACKUP_STATE = "dsound.dll.musicplayer-backup"
 PRODUCT_NAME = "Road Rash Music Player"
+OTHER_MODS_TASK = "othermodscompat"
+COMPAT_OFF = b"\nOtherModsCompat=0\n"
+COMPAT_ON = b"\nOtherModsCompat=1\n"
 
 
 def read_app_guid():
@@ -165,8 +168,14 @@ def is_built_dll(path):
 def case_script():
     print("== (s) installer script")
     text = open(ISS, "r", encoding="utf-8").read()
-    check(re.search(r'#ifndef AppVersion\s+#define AppVersion "0\.1\.0"\s+#endif', text) is not None,
-          "(s) AppVersion defaults to 0.1.0 and can be overridden with /DAppVersion")
+    check(re.search(r'#ifndef AppVersion\s+#define AppVersion "0\.1\.1"\s+#endif', text) is not None,
+          "(s) AppVersion defaults to 0.1.1 and can be overridden with /DAppVersion")
+    check(re.search(r'^Name: "othermodscompat"; Description: "\{cm:OtherModsTask\}"; Flags: unchecked\s*$', text,
+                    re.MULTILINE) is not None,
+          "(s) the experimental other mods task exists and is unchecked by default")
+    template = read_bytes(TEMPLATE_INI)
+    check(template.count(COMPAT_OFF) == 1 and COMPAT_ON not in template,
+          "(s) the rr95music.ini template ships OtherModsCompat=0 on one line")
     check(re.search(r'Source: "\.\.\\rr95music\.ini";.*Flags: onlyifdoesntexist uninsneveruninstall', text)
           is not None, "(s) rr95music.ini is added only when missing and never uninstalled")
     check(re.search(r'Name: "\{app\}\\music"; Flags: uninsneveruninstall', text) is not None,
@@ -355,6 +364,38 @@ def case_uninstall_keeps_user_data(setup):
         cleanup(game)
 
 
+def case_other_mods_task(setup):
+    print("== (i) the experimental task sets OtherModsCompat=1 only in a fresh rr95music.ini")
+    game = make_game_dir()
+    try:
+        code, log = run_setup(setup, game, "rrmusic-i.log", ["/TASKS=" + OTHER_MODS_TASK])
+        check(code == 0, "(i) setup exit code 0 (got %s)" % code)
+        ini = os.path.join(game, INI)
+        data = read_bytes(ini) if os.path.isfile(ini) else b""
+        check(data == read_bytes(TEMPLATE_INI).replace(COMPAT_OFF, COMPAT_ON),
+              "(i) the fresh rr95music.ini is the template with OtherModsCompat=1 and nothing else changed")
+        log_text = open(log, "r", encoding="utf-8", errors="replace").read() if os.path.isfile(log) else ""
+        check("Experimental OtherModsCompat=1 written" in log_text, "(i) the setup logged the experimental setting")
+        check(uninstall(game), "(i) uninstall finished")
+        check(os.path.isfile(ini) and read_bytes(ini) == data, "(i) rr95music.ini kept on uninstall")
+    finally:
+        cleanup(game)
+
+
+def case_other_mods_task_existing_ini(setup):
+    print("== (j) the experimental task never changes an existing rr95music.ini")
+    game = make_game_dir()
+    user_ini = b"[Music]\r\nEnabled=1\r\nOtherModsCompat=0\r\n; my settings\r\n"
+    try:
+        write_bytes(os.path.join(game, INI), user_ini)
+        code, _ = run_setup(setup, game, "rrmusic-j.log", ["/TASKS=" + OTHER_MODS_TASK])
+        check(code == 0, "(j) setup exit code 0 (got %s)" % code)
+        check(read_bytes(os.path.join(game, INI)) == user_ini, "(j) the player's rr95music.ini is unchanged")
+        check(uninstall(game), "(j) uninstall finished")
+    finally:
+        cleanup(game)
+
+
 def case_no_game_exe(setup):
     print("== (e) folder without RoadRash95.exe")
     game = make_game_dir(with_exe=False)
@@ -382,7 +423,7 @@ def main():
     print("Setup: " + setup)
     for case in (case_clean_install, case_existing_ini, case_foreign_dsound, case_stale_backup,
                  case_swapped_dsound, case_own_dsound_without_entry, case_uninstall_keeps_user_data,
-                 case_no_game_exe):
+                 case_other_mods_task, case_other_mods_task_existing_ini, case_no_game_exe):
         case(setup)
     check(not uninstall_entry_exists(), "no Road Rash Music Player uninstall entry left after the cases")
     if failures:

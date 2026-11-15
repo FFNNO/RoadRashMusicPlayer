@@ -1,5 +1,9 @@
 #pragma once
-// Public mod API of the Road Rash 95 general mod (the proxy ddraw.dll).
+// Internal, unused interface. The music player still compiles its dormant binding code against
+// this header, but no released mod exports RR95_GetModApi, so the player never connects through
+// it and always runs standalone. It is not a supported way to connect another mod.
+//
+// Original design notes, kept for the dormant code: a mod API of a Road Rash 95 proxy ddraw.dll.
 //
 // Self-contained on purpose: only <stdint.h> types and POD structs, valid in C and C++. An add-on
 // DLL includes this file alone and resolves RR95_GetModApi with GetProcAddress on the loaded

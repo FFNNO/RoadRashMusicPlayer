@@ -24,7 +24,7 @@ It is a proxy `dsound.dll`: it sits next to `RoadRash95.exe`, forwards every Dir
 - [The beeper](#the-beeper)
 - [Settings: rr95music.ini](#settings-rr95musicini)
 - [Registry values](#registry-values)
-- [With and without the general mod](#with-and-without-the-general-mod)
+- [Running alongside other mods](#running-alongside-other-mods)
 - [Uninstall](#uninstall)
 - [Troubleshooting](#troubleshooting)
 - [Known limitations](#known-limitations)
@@ -35,7 +35,7 @@ It is a proxy `dsound.dll`: it sits next to `RoadRash95.exe`, forwards every Dir
 
 - Windows 10 or 11.
 - **Road Rash 95 on Steam** (30th Anniversary Edition, app 2448570).
-- Optional: the general mod **Road Rash FFNNO Patch** (<https://github.com/FFNNO/RoadRashFFNNOPatch>), a proxy `ddraw.dll` with a GPU renderer, widescreen and more. The music player works without it. **To run both together, the general mod must be v0.1.4 or later.**
+- No other mod. The player runs standalone, and that is the recommended setup. Running it next to other mods that patch the same game routines, such as **Road Rash FFNNO Patch** (<https://github.com/FFNNO/RoadRashFFNNOPatch>), is experimental: see [Running alongside other mods](#running-alongside-other-mods).
 
 ## Install
 
@@ -43,11 +43,11 @@ It is a proxy `dsound.dll`: it sits next to `RoadRash95.exe`, forwards every Dir
 
 1. Download `RoadRashMusicPlayer-Setup-<version>.exe` from the [latest release](https://github.com/FFNNO/RoadRashMusicPlayer/releases/latest). Every release is built by GitHub Actions from the tagged commit and lists the SHA-256 of each file.
 2. Close the game and run the setup. It finds the game folder from the registry or your Steam libraries, and it only continues when `RoadRash95.exe` is in the chosen folder. If it cannot write there, run it as administrator.
-3. It installs `dsound.dll`, adds `rr95music.ini` only when the folder has none (your settings are never overwritten), and creates the `music` folder.
+3. It installs `dsound.dll`, adds `rr95music.ini` only when the folder has none (your settings are never overwritten), and creates the `music` folder. The unchecked task "Experimental: work alongside other mods" sets `OtherModsCompat=1` in that new `rr95music.ini` only; leave it unchecked for the standalone mode.
 
 If the game folder already has a `dsound.dll` from another mod, the setup warns you, keeps that file as `dsound.dll.bak-before-musicplayer` (or that name plus the date and time, when a backup of that name already exists), and puts it back when you uninstall. No backup is ever overwritten.
 
-Silent install: `RoadRashMusicPlayer-Setup-0.1.0.exe /VERYSILENT /CURRENTUSER /DIR="<game folder>"`.
+Silent install: `RoadRashMusicPlayer-Setup-0.1.1.exe /VERYSILENT /CURRENTUSER /DIR="<game folder>"`. Add `/TASKS="othermodscompat"` to select the experimental task.
 
 ### Manually
 
@@ -127,7 +127,8 @@ The beeper hotkey (`Home`) shows or hides the panel for the current race only; t
 
 | Key | Default | What it does |
 |---|---|---|
-| `Enabled` | `1` | `1` = load the player. `0` = forward DirectSound calls only: no hooks, no mod API calls. |
+| `Enabled` | `1` | `1` = load the player. `0` = forward DirectSound calls only: no hooks. |
+| `OtherModsCompat` | `0` | **Experimental.** `0` = standalone (recommended). `1` = chain onto hooks other mods already installed on the same game routines; see [Running alongside other mods](#running-alongside-other-mods). |
 | `LogLevel` | `info` | `debug`, `info`, `warn` or `error`; anything else uses `info`. |
 | `Path` | `music` | The cassette folder, relative to the game folder or absolute. Created on startup when missing. |
 | `Shuffle` | `0` | `1` = shuffle the tracks of every cassette; `0` = play them in name order. |
@@ -150,17 +151,27 @@ The player stores the choices you make in game under `HKCU\SOFTWARE\Electronic A
 | `ModMusicKeys` | `REG_BINARY` | version 1 plus one virtual-key byte per action |
 | `ModMusicOverlay` | `REG_BINARY` | one byte: `1` = pinned, `0` = on demand |
 
-## With and without the general mod
+## Running alongside other mods
 
-**With Road Rash FFNNO Patch v0.1.4 or later**, the player connects to it through its mod API (`RR95_GetModApi`) instead of patching the game code the general mod owns. The general mod draws the beeper with its renderer and shows the `Reproductor` row in its relocated graphics menu, next to its own Widescreen and Far view rows. The player registers the row very early, before the general mod builds that menu.
+### Standalone (default, recommended)
 
-**Without the general mod**, the player installs its own hooks on the same game routines, each one only after checking the game's original bytes. It writes the `Reproductor` row into the game's own graphics menu (an unused slot) and blends the beeper into the game image. Everything works the same way.
+**The standalone mode is the default, stable mode and the recommended setup.** The player installs its own hooks on the game routines it needs, each one only after checking the game's original bytes: the race and menu presents, the menu item text, the native music pause and resume, the race music start and the menu input used by key capture. It writes the `Reproductor` row into the game's own graphics menu (an unused slot) and blends the beeper into the game image. It needs no other mod.
 
-**With an older general mod** (before v0.1.4, without the mod API), both DLLs would want the same game routines. The player refuses to patch code that is already patched, so parts of it stay off. Update the general mod.
+When another mod has already patched one of those routines, the original bytes are gone, so the player leaves that routine alone and the part of the player that needs it stays off. Next to Road Rash FFNNO Patch v0.1.3, for example, the player stays silent, because that mod already patches the race present, the menu present and the menu item text.
 
-The player always patches four routines of its own (the native music pause and resume, the race music start and the menu input used by key capture), each one only after checking its original bytes.
+### Experimental: `OtherModsCompat=1`
 
-The API contract between the two mods is [`include/rr95_mod_api.h`](include/rr95_mod_api.h). **That header is owned by the general mod** (Road Rash FFNNO Patch, `renderer/src/rr95_mod_api.h`) and is copied here byte for byte; change it there first.
+`OtherModsCompat=1` in `rr95music.ini` turns on an **experimental** mode that chains the player onto hooks other mods already installed. When a routine starts with another mod's jump into that mod's own code, the player puts its own jump in front of it: the player's part runs first, then the other mod's code, which still reaches the game's original code. A routine that was changed in any other way is still left alone. The setup can set it in a new `rr95music.ini` with the unchecked task "Experimental: work alongside other mods".
+
+- **Tested target: Road Rash FFNNO Patch v0.1.3.** Expected: music and hotkeys work. The beeper and the `Reproductor` row may be unavailable next to a GPU mod: when the other mod draws the game itself (for example with Direct3D), the beeper cannot be drawn, and when it moves the graphics menu, the row is skipped. `rr95music.log` says so once. Other mods and other versions are not tested.
+- **Risks:** it depends on how the other mod keeps its hooks. If that mod removes or changes them, the player can lose those hooks: it checks them once per second, logs a lost hook once and stops using it, and never reinstalls it. A crash is possible.
+- **Turn it off:** set `OtherModsCompat=0` in `rr95music.ini` (or delete the line) and restart the game.
+
+### Another mod's `dsound.dll`
+
+Only one file named `dsound.dll` can be in the game folder, so a mod that is also a `dsound.dll` conflicts with the player by file name, in either mode. The setup keeps such a file aside and puts it back when you uninstall (see [Install](#install)).
+
+[`include/rr95_mod_api.h`](include/rr95_mod_api.h) is an internal, unused interface: the player's dormant binding code still compiles against it, but the player never connects through it.
 
 ## Uninstall
 
@@ -171,7 +182,9 @@ Your `music` folder, `rr95music.ini`, `rr95music.log` and the registry values ar
 
 ## Troubleshooting
 
-- **Nothing happens in game:** open `rr95music.log` in the game folder. It says whether the player loaded, whether it found the general mod, which hooks it installed and which cassettes it read. A line about an unknown exe build means the game executable changed: the player then only forwards DirectSound calls. Set `LogLevel=debug` for more detail.
+- **Nothing happens in game:** open `rr95music.log` in the game folder. It says whether the player loaded, the `OtherModsCompat` setting, which hooks it installed, chained or refused, and which cassettes it read. A line about an unknown exe build means the game executable changed: the player then only forwards DirectSound calls. Set `LogLevel=debug` for more detail.
+- **The player is silent next to another mod:** the log shows a `byte mismatch` for each routine that mod already patched. The standalone mode leaves those routines alone. You can try the experimental `OtherModsCompat=1` (see [Running alongside other mods](#running-alongside-other-mods)), or run the player without the other mod.
+- **Something breaks with `OtherModsCompat=1`:** set `OtherModsCompat=0` and restart the game, then report it with your `rr95music.log`.
 - **No music from my folder:** check `Path` and the file formats. Each first-level subfolder of `music\` is one cassette; files in deeper folders belong to their first-level cassette, and a cassette without supported files is skipped.
 - **Another mod also uses `dsound.dll`:** only one file of that name can be in the game folder, so only one of the two mods can be active. The setup keeps the other file as `dsound.dll.bak-before-musicplayer` (plus the date and time when that name is taken); uninstall the player to get it back, or swap the files by hand.
 - **A hotkey does nothing:** it may equal the general mod's `ToggleKey` or `F11`, which disables it; the log says so. Pick another key.
@@ -182,7 +195,8 @@ Your `music` folder, `rr95music.ini`, `rr95music.log` and the registry values ar
 - **`ModMusicKeys` stores plain keys only.** A binding with `Ctrl`, `Shift` or `Alt` from the ini keeps its modifiers for the current session only; the next start reads the plain key from the registry.
 - **It conflicts with any other mod that is also a `dsound.dll`.** Only one can be installed at a time.
 - **It needs the Steam executable it knows.** On another exe build the player stays off and only forwards DirectSound calls.
-- **This is a first public test release (v0.1.0).** Please report problems with your `rr95music.log`.
+- **`OtherModsCompat=1` is experimental.** It was tested only with Road Rash FFNNO Patch v0.1.3, and next to a GPU mod the beeper and the `Reproductor` row may be unavailable.
+- **This is an early public test release (v0.1.1).** Please report problems with your `rr95music.log`.
 
 ## Building from source
 
@@ -209,7 +223,7 @@ python -I installer\tests\test_installer.py
 | Path | Contents |
 |---|---|
 | `src/` | the player (C++17); `src/shared/` holds the hook engine, log and exe check shared with the general mod |
-| `include/rr95_mod_api.h` | the mod API contract, owned by the general mod |
+| `include/rr95_mod_api.h` | an internal, unused interface; the dormant binding code compiles against it |
 | `third_party/` | dr_libs and stb_vorbis, vendored unmodified |
 | `tests/music_test.cpp` | unit tests |
 | `tools/check_hook_sites.py` | hook-site checker |

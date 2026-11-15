@@ -3,8 +3,8 @@
 #include <winver.h>
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 0,1,0,0
- PRODUCTVERSION 0,1,0,0
+ FILEVERSION 0,1,1,0
+ PRODUCTVERSION 0,1,1,0
  FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
  FILEFLAGS 0x0L
  FILEOS VOS_NT_WINDOWS32
@@ -17,12 +17,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Road Rash Music Player"
             VALUE "FileDescription", "Road Rash Music Player (proxy dsound.dll for Road Rash 95)"
-            VALUE "FileVersion", "0.1.0"
+            VALUE "FileVersion", "0.1.1"
             VALUE "InternalName", "dsound"
             VALUE "LegalCopyright", "Copyright (c) 2026 FFNNO, MIT License"
             VALUE "OriginalFilename", "dsound.dll"
             VALUE "ProductName", "Road Rash Music Player"
-            VALUE "ProductVersion", "0.1.0"
+            VALUE "ProductVersion", "0.1.1"
         END
     END
     BLOCK "VarFileInfo"
