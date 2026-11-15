@@ -322,3 +322,34 @@ bool BeginMusicDibBlit(MusicDibBlitTracker& tracker, uint32_t frameSequence);
 // Ends only a blit that began: pass the value BeginMusicDibBlit returned. A refused reentrant call
 // must not clear the outer blit's active state (S5 review R3-dib-blit-tracker-refused-call-clears-active).
 void EndMusicDibBlit(MusicDibBlitTracker& tracker, bool began);
+
+// The beeper next to a mod that renders the game itself (for example with Direct3D). The GDI
+// StretchDIBits hook still installs, but the game's race present may never blit through GDI. When no
+// race-frame blit reaches the hook within kMusicBeeperBlitTimeoutMs while race frames arrive, the
+// beeper cannot be drawn next to that mod: this is logged once and nothing is faked.
+inline constexpr uint64_t kMusicBeeperBlitTimeoutMs = 5000;
+
+struct MusicBeeperBlitWatch {
+    bool raceFrameSeen = false;
+    uint64_t firstRaceFrameMs = 0;
+    bool blitSeen = false;
+    bool unavailableLogged = false;
+};
+
+enum class MusicBeeperBlitVerdict {
+    NotWatched = 0,  // no GDI hook: the install path already logged that
+    Waiting = 1,     // race frames arrive, no blit yet, still inside the timeout
+    Drawing = 2,     // a race-frame blit reached the hook
+    Unavailable = 3  // no race-frame blit within the timeout
+};
+
+struct MusicBeeperBlitDecision {
+    MusicBeeperBlitVerdict verdict = MusicBeeperBlitVerdict::NotWatched;
+    bool log = false;
+};
+
+// The GDI hook saw a blit of the game DIB during a race present.
+void NoteMusicBeeperRaceBlit(MusicBeeperBlitWatch& watch);
+// Called after every race present.
+MusicBeeperBlitDecision OnMusicBeeperRaceFrame(MusicBeeperBlitWatch& watch, bool gdiHookInstalled,
+                                               uint64_t nowMs);

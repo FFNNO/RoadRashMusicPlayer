@@ -24,6 +24,9 @@ enum class MusicCorner {
 struct MusicConfig {
     bool enabled = true;
     LogLevel logLevel = LogLevel::Info;
+    // Experimental: chain onto hooks other mods already installed on the same game routines
+    // (OtherModsCompat=1). Off by default; the standalone mode never chains.
+    bool otherModsCompat = false;
     std::wstring path = L"music";
     bool shuffle = false;
     int volume = 80;  // 0..100

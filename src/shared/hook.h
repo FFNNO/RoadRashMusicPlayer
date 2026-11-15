@@ -4,6 +4,8 @@
 #include <cstddef>
 #include <vector>
 
+#include "hook_chain.h"
+
 namespace rr95 {
 
 constexpr uint32_t kPreferredImageBase = 0x00400000;
@@ -22,14 +24,32 @@ struct HookSite {
     // the rebase delta before comparing, the trampoline copies the relocated bytes, and RemoveHook
     // restores them.
     std::vector<size_t> absoluteOperandOffsets = {};
+    // Experimental OtherModsCompat=1: the site held another mod's jump and our hook is chained onto
+    // it. chainSaved holds the other mod's first 5 bytes (put back on unload only while the site
+    // still holds chainOurs, our E9), and chainWatch says whether another mod rewrote the site since.
+    bool chained = false;
+    uint8_t chainSaved[kJmpRel32Length] = {};
+    uint8_t chainOurs[kJmpRel32Length] = {};
+    ChainedSiteWatch chainWatch = {};
 };
 
 // expected[] of site with every absolute operand rebased by delta (module base - preferred base).
 void BuildRelocatedExpected(const HookSite& site, intptr_t delta, uint8_t out[16]);
 
 const char* ValidateHookDecoding(const HookSite& site);
-bool InstallHook(HookSite& site, HMODULE moduleBase = nullptr);
+// Installs site when its live bytes are the shipped bytes. With otherModsCompat (the experimental
+// [Music] OtherModsCompat=1) a site that holds another mod's jump out of the game image is chained
+// onto that jump instead (see hook_chain.h); anything else is refused and logged.
+bool InstallHook(HookSite& site, HMODULE moduleBase = nullptr, bool otherModsCompat = false);
+// A chained site gets the other mod's bytes back only while it still holds our E9; otherwise it is
+// left alone, logged, and its trampoline is kept because another mod may still jump into it.
 void RemoveHook(HookSite& site, HMODULE moduleBase = nullptr);
+
+// True while an installed chained site still holds our E9. A fault reads as false.
+bool ChainedHookStillOurs(const HookSite& site, HMODULE moduleBase = nullptr);
+// One re-hook check of an installed chained site. Returns true only the first time the site is found
+// rewritten by another mod: it is logged once and marked lost (never reinstalled).
+bool MonitorChainedHook(HookSite& site, HMODULE moduleBase = nullptr);
 
 // Import address table hook on one by-name import (dllName!functionName) of a module.
 struct IatHook {

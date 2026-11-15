@@ -111,6 +111,8 @@ std::wstring ResolveMusicGamePath(const std::wstring& relOrAbsPath) {
 
 void ParseMusicConfigFile(const std::wstring& iniPath, MusicConfig& cfg) {
     cfg.enabled = GetPrivateProfileIntW(L"Music", L"Enabled", 1, iniPath.c_str()) != 0;
+    // Experimental, off by default: anything but a nonzero integer keeps the standalone mode.
+    cfg.otherModsCompat = GetPrivateProfileIntW(L"Music", L"OtherModsCompat", 0, iniPath.c_str()) != 0;
 
     wchar_t level[64] = {};
     GetPrivateProfileStringW(L"Music", L"LogLevel", L"info", level, 64, iniPath.c_str());

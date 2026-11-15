@@ -431,6 +431,38 @@ struct MusicMenuInPlacePlan {
 MusicMenuInPlacePlan PlanMusicMenuInPlace(bool ownRow, bool ownItemText, bool shippedMatches,
                                          bool installed);
 
+// Graphics menu 19 next to another mod. The in-place row writes slot 7 of the shipped array, so the
+// menu must still be the shipped one: its count at 0x005a0a70 is 8 and the menu table's item pointer
+// at 0x005946d8 (the array's only relocation) still points at the shipped array 0x005a08a8. A mod
+// that relocates the menu (a GPU mod with its own rows) changes one of them; the row is then skipped
+// and logged once, and music and hotkeys keep working.
+inline constexpr uint32_t kVaGraphicsMenuTableItems = 0x005946d8;
+
+enum class MusicMenu19Shape {
+    Shipped = 0,
+    CountChanged = 1,  // the count is not 8
+    TableMoved = 2,    // the table pointer no longer points at the shipped array
+    Unreadable = 3     // the count or the pointer cannot be read
+};
+
+struct MusicMenu19Inputs {
+    bool countRead = false;
+    int32_t count = 0;
+    bool tableRead = false;
+    uint32_t tableItems = 0;     // the live value at 0x005946d8
+    uint32_t expectedItems = 0;  // the live (rebased) address of the shipped array
+};
+
+struct MusicMenu19Decision {
+    MusicMenu19Shape shape = MusicMenu19Shape::Unreadable;
+    bool writeRow = false;
+    bool log = false;  // once: the first time the row is skipped for this reason
+    // English line for the mod log; never shown to the player.
+    const char* logMessage = "";
+};
+
+MusicMenu19Decision DecideMusicMenu19Shape(const MusicMenu19Inputs& inputs, bool alreadyLogged);
+
 // The engine asks FUN_0045b930 for the text of a value item. With the mod's own item-text detour the
 // call is answered from the mod when the item is the in-place row or one of the popup rows.
 enum class MusicItemTextOwner {

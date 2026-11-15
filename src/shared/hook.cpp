@@ -119,7 +119,139 @@ const char* ValidateHookDecoding(const HookSite& site) {
     return nullptr;
 }
 
-bool InstallHook(HookSite& site, HMODULE moduleBase) {
+namespace {
+
+uintptr_t SiteAddress(const HookSite& site, HMODULE moduleBase) {
+    if (moduleBase != nullptr) {
+        return reinterpret_cast<uintptr_t>(moduleBase) + (site.preferredVa - kPreferredImageBase);
+    }
+    return site.preferredVa;
+}
+
+uint32_t Address32(uintptr_t address) {
+    return static_cast<uint32_t>(address);
+}
+
+// Copies length bytes from address; false when the read faults.
+bool GuardedRead(const void* address, void* out, size_t length) {
+    __try {
+        std::memcpy(out, address, length);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool ReadPointerFromMemory(uint32_t address, uint32_t& value, void* /*ctx*/) {
+    return GuardedRead(reinterpret_cast<const void*>(static_cast<uintptr_t>(address)), &value, sizeof(value));
+}
+
+// Committed executable memory: another loaded module's code (MEM_IMAGE) or an executable allocation
+// such as another mod's trampoline (MEM_PRIVATE). The game image range is checked by the classifier.
+bool IsExecutableMemory(uint32_t address, void* /*ctx*/) {
+    MEMORY_BASIC_INFORMATION info = {};
+    if (VirtualQuery(reinterpret_cast<LPCVOID>(static_cast<uintptr_t>(address)), &info, sizeof(info)) !=
+        sizeof(info)) {
+        return false;
+    }
+    if (info.State != MEM_COMMIT || (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) {
+        return false;
+    }
+    const DWORD executable = PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    if ((info.Protect & executable) == 0) {
+        return false;
+    }
+    return info.Type == MEM_IMAGE || info.Type == MEM_PRIVATE;
+}
+
+// The host image range a foreign jump must leave: moduleBase, or the process exe without one.
+bool HostImageRange(HMODULE moduleBase, uint32_t& base, uint32_t& size) {
+    const HMODULE module = moduleBase != nullptr ? moduleBase : GetModuleHandleW(nullptr);
+    if (module == nullptr) {
+        return false;
+    }
+    const auto* bytes = reinterpret_cast<const uint8_t*>(module);
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(bytes);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
+        return false;
+    }
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS32*>(bytes + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) {
+        return false;
+    }
+    base = Address32(reinterpret_cast<uintptr_t>(module));
+    size = nt->OptionalHeader.SizeOfImage;
+    return true;
+}
+
+HookSiteClassification ClassifyLiveSite(const HookSite& site, uintptr_t targetAddr, HMODULE moduleBase,
+                                        uint8_t (&live)[sizeof(HookSite::expected)]) {
+    HookSiteClassification unknown;
+    const size_t liveLength = site.spanLength > kJmpIndirectLength ? site.spanLength : kJmpIndirectLength;
+    if (liveLength > sizeof(live) ||
+        !GuardedRead(reinterpret_cast<const void*>(targetAddr), live, liveLength)) {
+        unknown.reason = "the live bytes cannot be read";
+        return unknown;
+    }
+    uint32_t imageBase = 0;
+    uint32_t imageSize = 0;
+    if (!HostImageRange(moduleBase, imageBase, imageSize)) {
+        unknown.reason = "the game image range is unknown";
+        return unknown;
+    }
+    HookSiteMemory memory;
+    memory.readPointer = &ReadPointerFromMemory;
+    memory.isForeignExecutable = &IsExecutableMemory;
+    return ClassifyHookSite(false, live, liveLength, Address32(targetAddr), imageBase, imageSize, memory);
+}
+
+// Writes our E9 over the first 5 bytes of a site that holds another mod's jump; our trampoline is a
+// single E9 to that mod's detour, so its detour runs after ours and its trampoline still reaches the
+// original code. The rest of the other mod's span is never touched.
+bool InstallChainedHook(HookSite& site, uintptr_t targetAddr, const uint8_t (&live)[sizeof(HookSite::expected)],
+                        uint32_t foreignDestination) {
+    void* trampoline = VirtualAlloc(nullptr, kJmpRel32Length, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!trampoline) {
+        LOG_ERROR("VirtualAlloc failed for the chained trampoline of hook '%s' (error: %lu)",
+                  site.name ? site.name : "<unnamed>", GetLastError());
+        return false;
+    }
+    const ChainedHookPlan plan =
+        PlanChainedHook(live, Address32(targetAddr), Address32(reinterpret_cast<uintptr_t>(site.detour)),
+                        Address32(reinterpret_cast<uintptr_t>(trampoline)), foreignDestination);
+    std::memcpy(trampoline, plan.trampolineJump, kJmpRel32Length);
+    DWORD oldProtect = 0;
+    VirtualProtect(trampoline, kJmpRel32Length, PAGE_EXECUTE_READ, &oldProtect);
+    FlushInstructionCache(GetCurrentProcess(), trampoline, kJmpRel32Length);
+
+    void* target = reinterpret_cast<void*>(targetAddr);
+    if (!VirtualProtect(target, kJmpRel32Length, PAGE_EXECUTE_READWRITE, &oldProtect)) {
+        LOG_ERROR("VirtualProtect failed on target %p (error: %lu)", target, GetLastError());
+        VirtualFree(trampoline, 0, MEM_RELEASE);
+        return false;
+    }
+    std::memcpy(target, plan.siteJump, kJmpRel32Length);
+    VirtualProtect(target, kJmpRel32Length, oldProtect, &oldProtect);
+    FlushInstructionCache(GetCurrentProcess(), target, kJmpRel32Length);
+
+    std::memcpy(site.chainSaved, plan.savedSite, kJmpRel32Length);
+    std::memcpy(site.chainOurs, plan.siteJump, kJmpRel32Length);
+    site.chainWatch = ChainedSiteWatch{};
+    site.chained = true;
+    if (site.originalTrampoline) {
+        *site.originalTrampoline = trampoline;
+    }
+    site.installed = true;
+    LOG_WARN("Hook '%s' chained onto another mod's hook at %p (its detour %p, our trampoline %p); "
+             "experimental OtherModsCompat",
+             site.name ? site.name : "<unnamed>", target,
+             reinterpret_cast<void*>(static_cast<uintptr_t>(foreignDestination)), trampoline);
+    return true;
+}
+
+}  // namespace
+
+bool InstallHook(HookSite& site, HMODULE moduleBase, bool otherModsCompat) {
     if (site.installed) {
         return true;
     }
@@ -131,20 +263,35 @@ bool InstallHook(HookSite& site, HMODULE moduleBase) {
         return false;
     }
 
-    uintptr_t targetAddr = 0;
-    if (moduleBase != nullptr) {
-        targetAddr = reinterpret_cast<uintptr_t>(moduleBase) + (site.preferredVa - kPreferredImageBase);
-    } else {
-        targetAddr = site.preferredVa;
-    }
-
+    const uintptr_t targetAddr = SiteAddress(site, moduleBase);
     void* target = reinterpret_cast<void*>(targetAddr);
     uint8_t liveExpected[sizeof(site.expected)];
     BuildRelocatedExpected(site, RebaseDelta(moduleBase), liveExpected);
-    if (std::memcmp(target, liveExpected, site.spanLength) != 0) {
-        LOG_ERROR("Hook '%s' target %p byte mismatch: memory does not match expected bytes",
-                  site.name ? site.name : "<unnamed>", target);
+
+    // Shipped bytes install normally. Anything else is classified only in the experimental mode;
+    // without it a changed site is refused exactly as before.
+    HookSiteClassification classification;
+    uint8_t live[sizeof(site.expected)] = {};
+    if (std::memcmp(target, liveExpected, site.spanLength) == 0) {
+        classification.state = HookSiteState::Shipped;
+    } else if (otherModsCompat) {
+        classification = ClassifyLiveSite(site, targetAddr, moduleBase, live);
+    } else {
+        classification.state = HookSiteState::Unknown;
+    }
+    const HookSiteInstallAction action = DecideHookSiteInstall(otherModsCompat, classification.state);
+    if (action == HookSiteInstallAction::Refuse) {
+        if (otherModsCompat) {
+            LOG_ERROR("Hook '%s' target %p byte mismatch: %s; the site is refused",
+                      site.name ? site.name : "<unnamed>", target, classification.reason);
+        } else {
+            LOG_ERROR("Hook '%s' target %p byte mismatch: memory does not match expected bytes",
+                      site.name ? site.name : "<unnamed>", target);
+        }
         return false;
+    }
+    if (action == HookSiteInstallAction::InstallChained) {
+        return InstallChainedHook(site, targetAddr, live, classification.destination);
     }
 
     const size_t trampolineSize = site.spanLength + 5;
@@ -190,6 +337,7 @@ bool InstallHook(HookSite& site, HMODULE moduleBase) {
     if (site.originalTrampoline) {
         *site.originalTrampoline = trampoline;
     }
+    site.chained = false;
     site.installed = true;
 
     LOG_INFO("Hook '%s' installed at %p -> %p (trampoline: %p)",
@@ -202,15 +350,40 @@ void RemoveHook(HookSite& site, HMODULE moduleBase) {
         return;
     }
 
-    uintptr_t targetAddr = 0;
-    if (moduleBase != nullptr) {
-        targetAddr = reinterpret_cast<uintptr_t>(moduleBase) + (site.preferredVa - kPreferredImageBase);
-    } else {
-        targetAddr = site.preferredVa;
-    }
-
+    const uintptr_t targetAddr = SiteAddress(site, moduleBase);
     void* target = reinterpret_cast<void*>(targetAddr);
     DWORD oldProtect = 0;
+
+    if (site.chained) {
+        // The other mod's bytes go back only while the site still holds our E9. A site another mod
+        // rewrote keeps its bytes, and our trampoline stays allocated: that mod may still jump into
+        // our detour, which forwards through it.
+        bool restored = false;
+        uint8_t live[kJmpRel32Length] = {};
+        if (!site.chainWatch.lost && GuardedRead(target, live, sizeof(live)) &&
+            DecideChainedRestore(live, site.chainOurs) == ChainedRestoreAction::Restore &&
+            VirtualProtect(target, kJmpRel32Length, PAGE_EXECUTE_READWRITE, &oldProtect)) {
+            std::memcpy(target, site.chainSaved, kJmpRel32Length);
+            VirtualProtect(target, kJmpRel32Length, oldProtect, &oldProtect);
+            FlushInstructionCache(GetCurrentProcess(), target, kJmpRel32Length);
+            restored = true;
+        }
+        if (restored) {
+            if (site.originalTrampoline && *site.originalTrampoline) {
+                VirtualFree(*site.originalTrampoline, 0, MEM_RELEASE);
+                *site.originalTrampoline = nullptr;
+            }
+            LOG_INFO("Hook '%s' unchained from %p; the other mod's hook is back",
+                     site.name ? site.name : "<unnamed>", target);
+        } else {
+            LOG_WARN("Hook '%s' at %p no longer holds our jump; the site is left alone",
+                     site.name ? site.name : "<unnamed>", target);
+        }
+        site.chained = false;
+        site.installed = false;
+        return;
+    }
+
     uint8_t liveExpected[sizeof(site.expected)];
     BuildRelocatedExpected(site, RebaseDelta(moduleBase), liveExpected);
     if (VirtualProtect(target, site.spanLength, PAGE_EXECUTE_READWRITE, &oldProtect)) {
@@ -226,6 +399,31 @@ void RemoveHook(HookSite& site, HMODULE moduleBase) {
 
     site.installed = false;
     LOG_INFO("Hook '%s' removed from %p", site.name ? site.name : "<unnamed>", target);
+}
+
+bool ChainedHookStillOurs(const HookSite& site, HMODULE moduleBase) {
+    if (!site.installed || !site.chained) {
+        return false;
+    }
+    uint8_t live[kJmpRel32Length] = {};
+    if (!GuardedRead(reinterpret_cast<const void*>(SiteAddress(site, moduleBase)), live, sizeof(live))) {
+        return false;
+    }
+    return std::memcmp(live, site.chainOurs, sizeof(live)) == 0;
+}
+
+bool MonitorChainedHook(HookSite& site, HMODULE moduleBase) {
+    if (!site.installed || !site.chained) {
+        return false;
+    }
+    const ChainedSiteVerdict verdict =
+        DecideChainedSiteHealth(site.chainWatch, ChainedHookStillOurs(site, moduleBase));
+    if (verdict.log) {
+        LOG_WARN("Hook '%s' at %p was rewritten by another mod; this site is no longer used and is not "
+                 "reinstalled",
+                 site.name ? site.name : "<unnamed>", reinterpret_cast<void*>(SiteAddress(site, moduleBase)));
+    }
+    return verdict.log;
 }
 
 void** FindIatSlot(HMODULE moduleBase, const char* dllName, const char* functionName) {

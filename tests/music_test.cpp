@@ -30,6 +30,8 @@
 #include "../src/music_overlay.h"
 #include "../src/music_registry.h"
 #include "../src/music_tags.h"
+#include "../src/shared/hook.h"
+#include "../src/shared/hook_chain.h"
 
 #ifndef RR95_MUSIC_PROXY_PATH
 #define RR95_MUSIC_PROXY_PATH L"dsound.dll"
@@ -551,6 +553,23 @@ void TestMusicConfig() {
     ParseMusicConfigFile(file, cfg);
     Check(cfg.enabled && cfg.logLevel == LogLevel::Info,
           "config: a missing ini keeps Enabled=1 and LogLevel=info");
+
+    WriteTextFile(file, "[Music]\nOtherModsCompat=1\n");
+    cfg = MusicConfig{};
+    ParseMusicConfigFile(file, cfg);
+    Check(cfg.otherModsCompat, "config: OtherModsCompat=1 enables the experimental other mods mode");
+
+    WriteTextFile(file, "[Music]\nOtherModsCompat=0\n");
+    cfg = MusicConfig{};
+    cfg.otherModsCompat = true;
+    ParseMusicConfigFile(file, cfg);
+    Check(!cfg.otherModsCompat, "config: OtherModsCompat=0 keeps the standalone mode");
+
+    WriteTextFile(file, "[Music]\nEnabled=1\n");
+    cfg = MusicConfig{};
+    cfg.otherModsCompat = true;
+    ParseMusicConfigFile(file, cfg);
+    Check(!cfg.otherModsCompat, "config: a missing OtherModsCompat defaults to 0 (standalone)");
 
     WriteTextFile(file, "[Other]\nEnabled=0\nLogLevel=error\n");
     cfg = MusicConfig{};
@@ -5256,6 +5275,423 @@ void TestMusicOverlayDibBlend() {
 
 }  // namespace
 
+
+// ---------------------------------------------------------------------------
+// Experimental OtherModsCompat: chained hooks, menu 19 shape, beeper blit watch
+// ---------------------------------------------------------------------------
+
+struct FakeHookMemory {
+    uint32_t pointerAddress = 0;
+    uint32_t pointerValue = 0;
+    bool pointerReadable = false;
+    uint32_t execLo = 0;  // [execLo, execHi) is executable memory
+    uint32_t execHi = 0;
+};
+
+bool FakeReadPointer(uint32_t address, uint32_t& value, void* ctx) {
+    const auto* memory = static_cast<const FakeHookMemory*>(ctx);
+    if (!memory->pointerReadable || address != memory->pointerAddress) {
+        return false;
+    }
+    value = memory->pointerValue;
+    return true;
+}
+
+bool FakeIsForeignExecutable(uint32_t address, void* ctx) {
+    const auto* memory = static_cast<const FakeHookMemory*>(ctx);
+    return address >= memory->execLo && address < memory->execHi;
+}
+
+rr95::HookSiteMemory FakeMemoryCallbacks(FakeHookMemory& memory) {
+    rr95::HookSiteMemory callbacks;
+    callbacks.readPointer = &FakeReadPointer;
+    callbacks.isForeignExecutable = &FakeIsForeignExecutable;
+    callbacks.ctx = &memory;
+    return callbacks;
+}
+
+bool BytesEqual(const uint8_t* a, const uint8_t* b, size_t length) {
+    return std::memcmp(a, b, length) == 0;
+}
+
+void TestHookChainMath() {
+    Check(rr95::JmpRel32Destination(0x0046e630u, 0x0FB929CB) == 0x10001000u,
+          "chain math: E9 rel32 at 0x0046E630 reaches next instruction + rel32");
+    Check(rr95::JmpRel32Displacement(0x0046e630u, 0x10001000u) == 0x0FB929CB,
+          "chain math: the forward rel32 is destination - (site + 5)");
+    Check(rr95::JmpRel32Displacement(0x7FFE0000u, 0x6A001234u) == static_cast<int32_t>(0xEA02122Fu),
+          "chain math: a backward jump has a negative rel32");
+    Check(rr95::JmpRel32Destination(0x7FFE0000u, static_cast<int32_t>(0xEA02122Fu)) == 0x6A001234u,
+          "chain math: a negative rel32 decodes back to the destination");
+    Check(rr95::JmpRel32Displacement(0xFFFFFFF0u, 0x00000010u) == 0x1B &&
+              rr95::JmpRel32Destination(0xFFFFFFF0u, 0x1B) == 0x00000010u,
+          "chain math: the rel32 wraps modulo 2^32 like the CPU");
+
+    uint8_t encoded[rr95::kJmpRel32Length] = {};
+    rr95::EncodeJmpRel32(0x0046e630u, 0x10001000u, encoded);
+    const uint8_t expected[] = {0xE9, 0xCB, 0x29, 0xB9, 0x0F};
+    Check(BytesEqual(encoded, expected, sizeof(expected)), "chain math: E9 and a little-endian rel32 are encoded");
+
+    rr95::LeadingJump jump = rr95::DecodeLeadingJump(encoded, sizeof(encoded), 0x0046e630u);
+    Check(jump.kind == rr95::LeadingJumpKind::Rel32 && jump.destination == 0x10001000u && jump.length == 5,
+          "chain math: an encoded E9 decodes back to its destination");
+
+    const uint8_t indirect[] = {0xFF, 0x25, 0x78, 0x56, 0x34, 0x12};
+    jump = rr95::DecodeLeadingJump(indirect, sizeof(indirect), 0x0046e630u);
+    Check(jump.kind == rr95::LeadingJumpKind::IndirectAbs32 && jump.pointerAddress == 0x12345678u &&
+              jump.length == 6,
+          "chain math: FF 25 [abs32] decodes the pointer address");
+
+    const uint8_t shortJmp[] = {0xEB, 0x10, 0x90, 0x90, 0x90, 0x90};
+    const uint8_t prologue[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x24};
+    const uint8_t indirectCall[] = {0xFF, 0x15, 0x78, 0x56, 0x34, 0x12};
+    Check(rr95::DecodeLeadingJump(shortJmp, sizeof(shortJmp), 0x1000).kind == rr95::LeadingJumpKind::None &&
+              rr95::DecodeLeadingJump(prologue, sizeof(prologue), 0x1000).kind == rr95::LeadingJumpKind::None &&
+              rr95::DecodeLeadingJump(indirectCall, sizeof(indirectCall), 0x1000).kind ==
+                  rr95::LeadingJumpKind::None,
+          "chain math: EB rel8, a prologue and FF 15 (an indirect call) are not chainable jumps");
+    Check(rr95::DecodeLeadingJump(encoded, 4, 0x1000).kind == rr95::LeadingJumpKind::None &&
+              rr95::DecodeLeadingJump(indirect, 5, 0x1000).kind == rr95::LeadingJumpKind::None &&
+              rr95::DecodeLeadingJump(nullptr, 6, 0x1000).kind == rr95::LeadingJumpKind::None,
+          "chain math: a truncated or missing instruction decodes as no jump");
+}
+
+void TestHookSiteClassification() {
+    const uint32_t imageBase = 0x00400000u;
+    const uint32_t imageSize = 0x00230000u;
+    const uint32_t site = 0x0046e630u;
+    FakeHookMemory memory;
+    memory.execLo = 0x10000000u;
+    memory.execHi = 0x10100000u;
+    const rr95::HookSiteMemory callbacks = FakeMemoryCallbacks(memory);
+
+    const uint8_t shipped[] = {0x55, 0x8B, 0xEC, 0x81, 0xEC, 0x2C, 0x04, 0x00, 0x00};
+    rr95::HookSiteClassification c =
+        rr95::ClassifyHookSite(true, shipped, sizeof(shipped), site, imageBase, imageSize, callbacks);
+    Check(c.state == rr95::HookSiteState::Shipped, "classify: the shipped bytes are Shipped");
+
+    uint8_t foreign[9] = {0, 0, 0, 0, 0, 0x90, 0x90, 0x90, 0x90};
+    rr95::EncodeJmpRel32(site, 0x10001000u, foreign);
+    c = rr95::ClassifyHookSite(false, foreign, sizeof(foreign), site, imageBase, imageSize, callbacks);
+    Check(c.state == rr95::HookSiteState::ForeignJmp && c.jump == rr95::LeadingJumpKind::Rel32 &&
+              c.destination == 0x10001000u,
+          "classify: E9 into another module's executable code is ForeignJmp with its destination");
+
+    uint8_t intoImage[9] = {};
+    rr95::EncodeJmpRel32(site, 0x00401000u, intoImage);
+    FakeHookMemory everywhere = memory;
+    everywhere.execLo = 0x00001000u;
+    everywhere.execHi = 0xF0000000u;
+    c = rr95::ClassifyHookSite(false, intoImage, sizeof(intoImage), site, imageBase, imageSize,
+                               FakeMemoryCallbacks(everywhere));
+    Check(c.state == rr95::HookSiteState::Unknown, "classify: E9 to a destination inside the game image is Unknown");
+
+    uint8_t imageEnd[9] = {};
+    rr95::EncodeJmpRel32(site, imageBase + imageSize, imageEnd);
+    c = rr95::ClassifyHookSite(false, imageEnd, sizeof(imageEnd), site, imageBase, imageSize,
+                               FakeMemoryCallbacks(everywhere));
+    Check(c.state == rr95::HookSiteState::ForeignJmp,
+          "classify: the first byte past the game image is outside it");
+
+    uint8_t notExecutable[9] = {};
+    rr95::EncodeJmpRel32(site, 0x20000000u, notExecutable);
+    c = rr95::ClassifyHookSite(false, notExecutable, sizeof(notExecutable), site, imageBase, imageSize, callbacks);
+    Check(c.state == rr95::HookSiteState::Unknown,
+          "classify: E9 to memory that is not executable is Unknown");
+
+    const uint8_t indirect[] = {0xFF, 0x25, 0x00, 0x20, 0x00, 0x10, 0x90, 0x90, 0x90};
+    FakeHookMemory withPointer = memory;
+    withPointer.pointerAddress = 0x10002000u;
+    withPointer.pointerValue = 0x10003000u;
+    withPointer.pointerReadable = true;
+    c = rr95::ClassifyHookSite(false, indirect, sizeof(indirect), site, imageBase, imageSize,
+                               FakeMemoryCallbacks(withPointer));
+    Check(c.state == rr95::HookSiteState::ForeignJmp && c.jump == rr95::LeadingJumpKind::IndirectAbs32 &&
+              c.destination == 0x10003000u,
+          "classify: FF 25 whose pointer holds foreign executable code is ForeignJmp");
+
+    withPointer.pointerReadable = false;
+    c = rr95::ClassifyHookSite(false, indirect, sizeof(indirect), site, imageBase, imageSize,
+                               FakeMemoryCallbacks(withPointer));
+    Check(c.state == rr95::HookSiteState::Unknown, "classify: FF 25 with an unreadable pointer is Unknown");
+
+    const uint8_t patched[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x10, 0x90, 0x90, 0x90};
+    c = rr95::ClassifyHookSite(false, patched, sizeof(patched), site, imageBase, imageSize, callbacks);
+    Check(c.state == rr95::HookSiteState::Unknown, "classify: other changed bytes are Unknown");
+
+    c = rr95::ClassifyHookSite(false, foreign, sizeof(foreign), site, imageBase, imageSize, rr95::HookSiteMemory{});
+    Check(c.state == rr95::HookSiteState::Unknown,
+          "classify: without a memory query nothing is proven foreign, so the site is Unknown");
+    c = rr95::ClassifyHookSite(false, foreign, 3, site, imageBase, imageSize, callbacks);
+    Check(c.state == rr95::HookSiteState::Unknown, "classify: too few live bytes are Unknown");
+    Check(c.reason != nullptr && std::strlen(c.reason) > 0, "classify: an Unknown site carries a reason for the log");
+}
+
+void TestHookSiteInstallDecision() {
+    using rr95::DecideHookSiteInstall;
+    using rr95::HookSiteInstallAction;
+    using rr95::HookSiteState;
+    Check(DecideHookSiteInstall(false, HookSiteState::Shipped) == HookSiteInstallAction::InstallNormal &&
+              DecideHookSiteInstall(true, HookSiteState::Shipped) == HookSiteInstallAction::InstallNormal,
+          "install decision: shipped bytes install normally with the setting on or off");
+    Check(DecideHookSiteInstall(false, HookSiteState::ForeignJmp) == HookSiteInstallAction::Refuse,
+          "install decision: a foreign jump is never chained with OtherModsCompat=0");
+    Check(DecideHookSiteInstall(true, HookSiteState::ForeignJmp) == HookSiteInstallAction::InstallChained,
+          "install decision: a foreign jump is chained with OtherModsCompat=1");
+    Check(DecideHookSiteInstall(false, HookSiteState::Unknown) == HookSiteInstallAction::Refuse &&
+              DecideHookSiteInstall(true, HookSiteState::Unknown) == HookSiteInstallAction::Refuse,
+          "install decision: unknown bytes are refused with the setting on or off");
+}
+
+void TestChainedHookPlanAndRestore() {
+    uint8_t live[rr95::kJmpRel32Length] = {};
+    rr95::EncodeJmpRel32(0x0046e630u, 0x6A001234u, live);
+    const rr95::ChainedHookPlan plan =
+        rr95::PlanChainedHook(live, 0x0046e630u, 0x10001000u, 0x7FFE0000u, 0x6A001234u);
+    Check(BytesEqual(plan.savedSite, live, sizeof(live)), "chain plan: the other mod's 5 bytes are saved");
+    const uint8_t siteJump[] = {0xE9, 0xCB, 0x29, 0xB9, 0x0F};
+    Check(BytesEqual(plan.siteJump, siteJump, sizeof(siteJump)),
+          "chain plan: our E9 at the site reaches our detour (rel32 from the site)");
+    const uint8_t trampolineJump[] = {0xE9, 0x2F, 0x12, 0x02, 0xEA};
+    Check(BytesEqual(plan.trampolineJump, trampolineJump, sizeof(trampolineJump)),
+          "chain plan: our trampoline's E9 reaches the other mod's detour (rel32 from the trampoline)");
+
+    Check(rr95::DecideChainedRestore(plan.siteJump, plan.siteJump) == rr95::ChainedRestoreAction::Restore,
+          "chain restore: the other mod's bytes go back while the site holds our E9");
+    uint8_t rewritten[rr95::kJmpRel32Length] = {};
+    std::memcpy(rewritten, plan.siteJump, sizeof(rewritten));
+    rewritten[4] ^= 0x01;
+    Check(rr95::DecideChainedRestore(rewritten, plan.siteJump) == rr95::ChainedRestoreAction::LeaveAlone,
+          "chain restore: a site that no longer holds our E9 is left alone");
+}
+
+void TestChainedSiteMonitor() {
+    rr95::ChainedSiteCheckClock clock;
+    Check(!rr95::ShouldRunChainedSiteCheck(clock, false, true, 5000),
+          "monitor: no check with OtherModsCompat=0");
+    Check(!rr95::ShouldRunChainedSiteCheck(clock, true, false, 5000), "monitor: no check without a chained site");
+    Check(rr95::ShouldRunChainedSiteCheck(clock, true, true, 5000), "monitor: the first check runs at once");
+    Check(!rr95::ShouldRunChainedSiteCheck(clock, true, true, 5500) &&
+              !rr95::ShouldRunChainedSiteCheck(clock, true, true, 5999),
+          "monitor: at most one check per second");
+    Check(rr95::ShouldRunChainedSiteCheck(clock, true, true, 6000), "monitor: the next check runs after one second");
+    Check(!rr95::ShouldRunChainedSiteCheck(clock, true, true, 6000), "monitor: the same tick never checks twice");
+
+    rr95::ChainedSiteWatch watch;
+    rr95::ChainedSiteVerdict verdict = rr95::DecideChainedSiteHealth(watch, true);
+    Check(verdict.keepUsing && !verdict.log && !watch.lost, "monitor: a site that holds our E9 stays in use");
+    verdict = rr95::DecideChainedSiteHealth(watch, false);
+    Check(!verdict.keepUsing && verdict.log && watch.lost,
+          "monitor: a rewritten site is logged once and no longer used");
+    verdict = rr95::DecideChainedSiteHealth(watch, false);
+    Check(!verdict.keepUsing && !verdict.log, "monitor: a lost site is not logged again");
+    verdict = rr95::DecideChainedSiteHealth(watch, true);
+    Check(!verdict.keepUsing && !verdict.log && watch.lost, "monitor: a lost site is never reinstalled or reused");
+}
+
+using ChainTestFn = int(__cdecl*)();
+ChainTestFn g_chainTestTrampoline = nullptr;
+
+int __cdecl ChainTestDetour() {
+    return g_chainTestTrampoline != nullptr ? g_chainTestTrampoline() + 1 : -1;
+}
+
+uint32_t Addr32(const void* p) {
+    return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(p));
+}
+
+void WriteCode(uint8_t* at, const uint8_t* code, size_t length) {
+    std::memcpy(at, code, length);
+    FlushInstructionCache(GetCurrentProcess(), at, length);
+}
+
+// Encoded here by hand, independent of the code under test.
+void WriteJmp(uint8_t* at, const void* to) {
+    const uint32_t rel = Addr32(to) - (Addr32(at) + 5u);
+    const uint8_t jmp[5] = {0xE9, static_cast<uint8_t>(rel), static_cast<uint8_t>(rel >> 8),
+                            static_cast<uint8_t>(rel >> 16), static_cast<uint8_t>(rel >> 24)};
+    WriteCode(at, jmp, sizeof(jmp));
+}
+
+// The real hook engine against executable buffers of this process: a "game routine" whose first
+// instruction is another mod's E9 into its own code, our detour that adds 1, and a third mod that
+// rewrites the site later.
+void TestChainedHookEngine() {
+    auto* foreign = static_cast<uint8_t*>(
+        VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    auto* site = static_cast<uint8_t*>(
+        VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    auto* third = static_cast<uint8_t*>(
+        VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    Check(foreign != nullptr && site != nullptr && third != nullptr, "chain engine: executable test buffers");
+    if (foreign == nullptr || site == nullptr || third == nullptr) {
+        return;
+    }
+    const uint8_t returns42[] = {0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3};  // mov eax, 42; ret
+    const uint8_t returns7[] = {0xB8, 0x07, 0x00, 0x00, 0x00, 0xC3};   // mov eax, 7; ret
+    WriteCode(foreign, returns42, sizeof(returns42));
+    WriteCode(third, returns7, sizeof(returns7));
+    const auto call = reinterpret_cast<ChainTestFn>(site);
+
+    // The other mod's hook: E9 to its detour plus one NOP over the rest of the shipped prologue.
+    WriteJmp(site, foreign);
+    site[5] = 0x90;
+    uint8_t otherModBytes[rr95::kJmpRel32Length] = {};
+    std::memcpy(otherModBytes, site, sizeof(otherModBytes));
+
+    rr95::HookSite hook{"chain-test", Addr32(site), {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x24}, 6, {1, 2, 3},
+                        reinterpret_cast<void*>(&ChainTestDetour),
+                        reinterpret_cast<void**>(&g_chainTestTrampoline), false};
+
+    Check(!rr95::InstallHook(hook, nullptr, false) && !hook.installed &&
+              BytesEqual(site, otherModBytes, sizeof(otherModBytes)),
+          "chain engine: with OtherModsCompat=0 the foreign site is refused and left untouched");
+    Check(call() == 42, "chain engine: the other mod's detour runs alone while the site is refused");
+
+    Check(rr95::InstallHook(hook, nullptr, true) && hook.installed && hook.chained,
+          "chain engine: with OtherModsCompat=1 the foreign site is chained");
+    const rr95::LeadingJump ours = rr95::DecodeLeadingJump(site, 5, Addr32(site));
+    Check(ours.kind == rr95::LeadingJumpKind::Rel32 && ours.destination == Addr32(&ChainTestDetour),
+          "chain engine: the site holds our E9 to our detour");
+    const rr95::LeadingJump trampoline =
+        g_chainTestTrampoline != nullptr
+            ? rr95::DecodeLeadingJump(reinterpret_cast<const uint8_t*>(g_chainTestTrampoline), 5,
+                                      Addr32(g_chainTestTrampoline))
+            : rr95::LeadingJump{};
+    Check(trampoline.kind == rr95::LeadingJumpKind::Rel32 && trampoline.destination == Addr32(foreign),
+          "chain engine: our trampoline jumps to the other mod's detour");
+    Check(BytesEqual(hook.chainSaved, otherModBytes, sizeof(otherModBytes)) && site[5] == 0x90,
+          "chain engine: the other mod's 5 bytes are saved and the rest of its span is untouched");
+    Check(hook.chained && call() == 43, "chain engine: our detour runs first, then the other mod's detour");
+    Check(rr95::ChainedHookStillOurs(hook, nullptr) && !rr95::MonitorChainedHook(hook, nullptr) &&
+              !hook.chainWatch.lost,
+          "chain engine: an intact chained site passes the re-hook check");
+
+    rr95::RemoveHook(hook, nullptr);
+    Check(!hook.installed && !hook.chained && BytesEqual(site, otherModBytes, sizeof(otherModBytes)) &&
+              g_chainTestTrampoline == nullptr,
+          "chain engine: unload puts the other mod's bytes back while the site holds our E9");
+    Check(BytesEqual(site, otherModBytes, sizeof(otherModBytes)) && call() == 42,
+          "chain engine: after unload the other mod's detour runs alone again");
+
+    Check(rr95::InstallHook(hook, nullptr, true) && hook.chained, "chain engine: the site chains again");
+    if (hook.chained) {
+        WriteJmp(site, third);  // a third mod rewrites the site
+        Check(!rr95::ChainedHookStillOurs(hook, nullptr), "chain engine: a rewritten site no longer holds our E9");
+        Check(rr95::MonitorChainedHook(hook, nullptr) && hook.chainWatch.lost,
+              "chain engine: the re-hook check reports the rewritten site once");
+        Check(!rr95::MonitorChainedHook(hook, nullptr), "chain engine: a lost site is reported only once");
+        uint8_t thirdBytes[rr95::kJmpRel32Length] = {};
+        std::memcpy(thirdBytes, site, sizeof(thirdBytes));
+        rr95::RemoveHook(hook, nullptr);
+        Check(!hook.installed && BytesEqual(site, thirdBytes, sizeof(thirdBytes)) && call() == 7,
+              "chain engine: unload leaves a site another mod rewrote alone");
+    }
+    hook = rr95::HookSite{"chain-test", Addr32(site), {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x24}, 6, {1, 2, 3},
+                          reinterpret_cast<void*>(&ChainTestDetour),
+                          reinterpret_cast<void**>(&g_chainTestTrampoline), false};
+    g_chainTestTrampoline = nullptr;
+
+    WriteJmp(site, reinterpret_cast<const void*>(&ChainTestDetour));  // a jump into this image
+    std::memcpy(otherModBytes, site, sizeof(otherModBytes));
+    Check(!rr95::InstallHook(hook, nullptr, true) && !hook.installed &&
+              BytesEqual(site, otherModBytes, sizeof(otherModBytes)),
+          "chain engine: a jump that stays inside the host image is Unknown and refused");
+
+    std::memset(site, 0xCC, 16);
+    FlushInstructionCache(GetCurrentProcess(), site, 16);
+    Check(!rr95::InstallHook(hook, nullptr, true) && !hook.installed && site[0] == 0xCC,
+          "chain engine: unknown bytes are refused with OtherModsCompat=1");
+
+    // The shipped prologue still installs normally with the setting on: push ebp; mov ebp, esp;
+    // sub esp, 0x24; mov eax, 5; mov esp, ebp; pop ebp; ret.
+    const uint8_t shippedRoutine[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x24, 0xB8, 0x05,
+                                      0x00, 0x00, 0x00, 0x8B, 0xE5, 0x5D, 0xC3};
+    WriteCode(site, shippedRoutine, sizeof(shippedRoutine));
+    Check(call() == 5, "chain engine: the shipped routine returns 5");
+    Check(rr95::InstallHook(hook, nullptr, true) && hook.installed && !hook.chained && call() == 6,
+          "chain engine: shipped bytes install a normal (unchained) hook with OtherModsCompat=1");
+    rr95::RemoveHook(hook, nullptr);
+    Check(!hook.installed && BytesEqual(site, shippedRoutine, sizeof(shippedRoutine)) && call() == 5,
+          "chain engine: a normal hook still restores the shipped bytes");
+
+    VirtualFree(third, 0, MEM_RELEASE);
+    VirtualFree(site, 0, MEM_RELEASE);
+    VirtualFree(foreign, 0, MEM_RELEASE);
+}
+
+void TestMusicMenu19Shape() {
+    MusicMenu19Inputs inputs;
+    inputs.countRead = true;
+    inputs.count = 8;
+    inputs.tableRead = true;
+    inputs.tableItems = 0x005a08a8u;
+    inputs.expectedItems = 0x005a08a8u;
+    MusicMenu19Decision decision = DecideMusicMenu19Shape(inputs, false);
+    Check(decision.shape == MusicMenu19Shape::Shipped && decision.writeRow && !decision.log,
+          "menu 19: the shipped count and table pointer allow the in-place row");
+
+    MusicMenu19Inputs counted = inputs;
+    counted.count = 10;
+    decision = DecideMusicMenu19Shape(counted, false);
+    Check(decision.shape == MusicMenu19Shape::CountChanged && !decision.writeRow && decision.log &&
+              std::strlen(decision.logMessage) > 0,
+          "menu 19: a count other than 8 skips the row and logs");
+    decision = DecideMusicMenu19Shape(counted, true);
+    Check(!decision.writeRow && !decision.log, "menu 19: the skip is logged only once");
+
+    MusicMenu19Inputs moved = inputs;
+    moved.tableItems = 0x10002000u;
+    decision = DecideMusicMenu19Shape(moved, false);
+    Check(decision.shape == MusicMenu19Shape::TableMoved && !decision.writeRow && decision.log,
+          "menu 19: a table pointer another mod moved skips the row and logs");
+
+    MusicMenu19Inputs unreadable = inputs;
+    unreadable.countRead = false;
+    decision = DecideMusicMenu19Shape(unreadable, false);
+    Check(decision.shape == MusicMenu19Shape::Unreadable && !decision.writeRow,
+          "menu 19: an unreadable count never writes the row");
+    unreadable = inputs;
+    unreadable.tableRead = false;
+    decision = DecideMusicMenu19Shape(unreadable, false);
+    Check(decision.shape == MusicMenu19Shape::Unreadable && !decision.writeRow,
+          "menu 19: an unreadable table pointer never writes the row");
+}
+
+void TestMusicBeeperBlitWatch() {
+    MusicBeeperBlitWatch watch;
+    MusicBeeperBlitDecision decision = OnMusicBeeperRaceFrame(watch, false, 1000);
+    Check(decision.verdict == MusicBeeperBlitVerdict::NotWatched && !decision.log,
+          "beeper watch: without the GDI hook nothing is watched");
+
+    decision = OnMusicBeeperRaceFrame(watch, true, 1000);
+    Check(decision.verdict == MusicBeeperBlitVerdict::Waiting && !decision.log,
+          "beeper watch: the first race frame starts the wait");
+    decision = OnMusicBeeperRaceFrame(watch, true, 1000 + kMusicBeeperBlitTimeoutMs - 1);
+    Check(decision.verdict == MusicBeeperBlitVerdict::Waiting && !decision.log,
+          "beeper watch: no verdict inside the timeout");
+    decision = OnMusicBeeperRaceFrame(watch, true, 1000 + kMusicBeeperBlitTimeoutMs);
+    Check(decision.verdict == MusicBeeperBlitVerdict::Unavailable && decision.log,
+          "beeper watch: no race-frame blit within the timeout is logged");
+    decision = OnMusicBeeperRaceFrame(watch, true, 1000 + kMusicBeeperBlitTimeoutMs + 1000);
+    Check(decision.verdict == MusicBeeperBlitVerdict::Unavailable && !decision.log,
+          "beeper watch: the unavailable beeper is logged only once");
+    NoteMusicBeeperRaceBlit(watch);
+    decision = OnMusicBeeperRaceFrame(watch, true, 1000 + kMusicBeeperBlitTimeoutMs + 2000);
+    Check(decision.verdict == MusicBeeperBlitVerdict::Drawing && !decision.log,
+          "beeper watch: a later race-frame blit means the beeper is drawn");
+
+    MusicBeeperBlitWatch drawing;
+    OnMusicBeeperRaceFrame(drawing, true, 100);
+    NoteMusicBeeperRaceBlit(drawing);
+    decision = OnMusicBeeperRaceFrame(drawing, true, 200);
+    Check(decision.verdict == MusicBeeperBlitVerdict::Drawing && !decision.log,
+          "beeper watch: a blit on the first race frame is the shipped GDI path");
+    decision = OnMusicBeeperRaceFrame(drawing, true, 100000);
+    Check(decision.verdict == MusicBeeperBlitVerdict::Drawing && !decision.log,
+          "beeper watch: a drawing beeper never times out");
+}
+
 int main() {
     TestBindingDecision();
     TestApiTableValidation();
@@ -5279,6 +5715,14 @@ int main() {
     TestMusicMenuInPlace();
     TestMusicItemTextOwner();
     TestMusicOverlayDibBlend();
+    TestHookChainMath();
+    TestHookSiteClassification();
+    TestHookSiteInstallDecision();
+    TestChainedHookPlanAndRestore();
+    TestChainedSiteMonitor();
+    TestChainedHookEngine();
+    TestMusicMenu19Shape();
+    TestMusicBeeperBlitWatch();
 
     std::printf("%s (%d failure(s))\n", g_failures == 0 ? "OK" : "FAILED", g_failures);
     return g_failures == 0 ? 0 : 1;

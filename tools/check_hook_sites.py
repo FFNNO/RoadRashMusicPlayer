@@ -11,7 +11,9 @@ With both executables it checks the music detours in src/music_glue.cpp against 
 each exe: the four player-only sites never overlap the general mod's hook-site table, and the
 fallback sites (race present, menu present, item text) match the general table at the same address,
 carry the capability that guards them, and keep the ShouldInstallFallbackSite /
-ShouldInstallGdiOverlayHook guards in the install path. It checks the music call-target table (the
+ShouldInstallGdiOverlayHook guards in the install path. src/shared/hook.cpp must route every site through
+the pure DecideHookSiteInstall decision, so a site that holds another mod's jump is chained only with the
+experimental [Music] OtherModsCompat=1 and refused otherwise. It checks the music call-target table (the
 native MIDI pause FUN_004459c0) against the expected bytes of the original and the patched exe,
 because that routine is called through a rebased pointer without a hook site.
 
@@ -26,7 +28,7 @@ the DLL name is scanned in order and the first match wins; the name table is Ori
 FirstThunk when OriginalFirstThunk is 0; ordinal entries are skipped, and so is an entry that is not an
 RVA inside the image (an entry the loader already bound to an address).
 
-The general mod (Road Rash FFNNO Patch) owns its hook-site table, renderer/src/hook_sites.cpp in its
+The general mod (Road Rash FFNNO Patch) keeps its own hook-site table, renderer/src/hook_sites.cpp in its
 own repository. GENERAL_SITES below is a snapshot of that table, verified against both exes too.
 
 Exit code 0 when every check passes, or when the executables are not provided.
@@ -44,13 +46,14 @@ ENGINE_HEADER = ROOT / "src" / "engine.h"
 EARLY_HOOK_SOURCE = ROOT / "src" / "dsound_proxy.cpp"
 EARLY_HOOK_IMPL = ROOT / "src" / "early_hook.cpp"
 EARLY_HOOK_HEADER = ROOT / "src" / "early_hook.h"
+HOOK_ENGINE_SOURCE = ROOT / "src" / "shared" / "hook.cpp"
 
 ORIGINAL_ENV = "RR95_ORIGINAL_EXE"
 PATCHED_ENV = "RR95_PATCHED_EXE"
 
-# Snapshot of the general mod's hook-site table (Road Rash FFNNO Patch, renderer/src/hook_sites.cpp,
-# as of v0.1.4, the first release with RR95_GetModApi): name, VA, shipped bytes, patched span,
-# instruction lengths.
+# Snapshot of the general mod's hook-site table (Road Rash FFNNO Patch, renderer/src/hook_sites.cpp):
+# name, VA, shipped bytes, patched span, instruction lengths. The shipped bytes are the game's own, so
+# the snapshot is verified against both exes below.
 GENERAL_SITES = [
     ("FUN_0046e630", 0x0046E630, bytes.fromhex("55 8b ec 81 ec 2c 04 00 00"), 9, [1, 2, 6]),
     ("FUN_0046ded0", 0x0046DED0, bytes.fromhex("55 8b ec 83 ec 24"), 6, [1, 2, 3]),
@@ -66,9 +69,10 @@ GENERAL_SITES = [
     ("FUN_0043f7c0", 0x0043F7C0, bytes.fromhex("55 8b ec 83 ec 0c"), 6, [1, 2, 3]),
 ]
 
-# The music mod keeps the VAs in engine:: constants. The fallback sites duplicate a general mod
-# site: they are installed only when the binding decision says the music mod owns that capability
-# (ShouldInstallFallbackSite), so both DLLs never patch the same bytes.
+# The music mod keeps the VAs in engine:: constants. The fallback sites are the same routines as general
+# mod sites: they are installed only when the binding decision says the music mod owns that capability
+# (ShouldInstallFallbackSite). Next to a mod that already detoured one of them, the site is refused, or
+# chained onto that mod's jump with the experimental OtherModsCompat=1 (see HOOK_ENGINE_MARKERS).
 MUSIC_ENTRY = re.compile(
     r'(?P<var>g_site\w+)\{\s*"(?P<name>FUN_[0-9A-Fa-f]{8})",\s*engine::(?P<const>\w+),\s*'
     r'\{(?P<bytes>[^}]*)\},\s*(?P<len>\d+),\s*\{(?P<insn>[^}]*)\}'
@@ -86,6 +90,14 @@ FALLBACK_GUARD = "ShouldInstallFallbackSite(decisions, fallback.capability)"
 FALLBACK_INSTALL = "rr95::InstallHook(*fallback.site"
 GDI_GUARD = "ShouldInstallGdiOverlayHook(decisions, api != nullptr)"
 GDI_INSTALL = "rr95::InstallIatHook(g_iatDibBlend"
+# The hook engine: every site goes through the pure per-site decision, which never chains when the
+# setting is 0, and the fallback install passes the setting explicitly.
+HOOK_ENGINE_MARKERS = (
+    (HOOK_ENGINE_SOURCE, "DecideHookSiteInstall(otherModsCompat, classification.state)",
+     "the pure per-site install decision"),
+    (MUSIC_TABLE, "rr95::InstallHook(*fallback.site, module, GetMusicConfig().otherModsCompat)",
+     "the OtherModsCompat setting on the fallback install"),
+)
 
 # The MIDI pause routine is not hooked: music_glue.cpp calls it through a rebased pointer after
 # checking its bytes once. The struct holds the expected bytes for the original and the patched exe.
@@ -400,6 +412,15 @@ def check_fallback_guard(text):
     return failures
 
 
+def check_hook_engine(texts):
+    failures = 0
+    for path, marker, what in HOOK_ENGINE_MARKERS:
+        ok = marker in texts[path]
+        failures += not ok
+        print(f"{'OK  ' if ok else 'FAIL'} hook engine keeps {what} ({path.name}): {marker}")
+    return failures
+
+
 def check_music_call_target_table(targets):
     failures = 0
     found = {va for _, va, _, _, _, _, _, _ in targets}
@@ -475,8 +496,10 @@ def main(argv):
     if check_fallback_guard(music_text):
         return 1
     texts = {path: path.read_text(encoding="utf-8")
-             for path in (EARLY_HOOK_SOURCE, EARLY_HOOK_IMPL, EARLY_HOOK_HEADER)}
+             for path in (EARLY_HOOK_SOURCE, EARLY_HOOK_IMPL, EARLY_HOOK_HEADER, HOOK_ENGINE_SOURCE, MUSIC_TABLE)}
     if check_early_hook_source(texts):
+        return 1
+    if check_hook_engine(texts):
         return 1
     fallback_vars = {var for var, _cap in fallbacks}
     fallback_vas = {va for var, _name, va, _data, _len, _insn in music_sites if var in fallback_vars}

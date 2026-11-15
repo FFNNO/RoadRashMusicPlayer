@@ -7,6 +7,11 @@
 // The music mod connects to the general mod through RR95_GetModApi when the general mod owns a
 // site, and installs its own hooks only on sites the general mod does not hold. This header is
 // free of Windows headers so music_test can exercise every rule in-process.
+//
+// The API path is dormant: no released mod exports RR95_GetModApi, so the decision is OwnHooks for
+// every capability and the player runs standalone. Next to another mod that already detoured the
+// same routines, the experimental [Music] OtherModsCompat=1 chains those OwnHooks sites onto that
+// mod's hooks (src/shared/hook_chain.h) instead of refusing them.
 namespace rr95::music {
 
 enum class Capability : int {

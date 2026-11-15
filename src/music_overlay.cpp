@@ -797,3 +797,35 @@ void EndMusicDibBlit(MusicDibBlitTracker& tracker, bool began) {
     }
     tracker.active = false;
 }
+
+void NoteMusicBeeperRaceBlit(MusicBeeperBlitWatch& watch) {
+    watch.blitSeen = true;
+}
+
+MusicBeeperBlitDecision OnMusicBeeperRaceFrame(MusicBeeperBlitWatch& watch, bool gdiHookInstalled,
+                                               uint64_t nowMs) {
+    MusicBeeperBlitDecision decision;
+    if (!gdiHookInstalled) {
+        decision.verdict = MusicBeeperBlitVerdict::NotWatched;
+        return decision;
+    }
+    if (watch.blitSeen) {
+        decision.verdict = MusicBeeperBlitVerdict::Drawing;
+        return decision;
+    }
+    if (!watch.raceFrameSeen) {
+        watch.raceFrameSeen = true;
+        watch.firstRaceFrameMs = nowMs;
+        decision.verdict = MusicBeeperBlitVerdict::Waiting;
+        return decision;
+    }
+    if (nowMs - watch.firstRaceFrameMs < kMusicBeeperBlitTimeoutMs) {
+        decision.verdict = MusicBeeperBlitVerdict::Waiting;
+        return decision;
+    }
+    // Never faked: the beeper is simply not drawn, and the reason is logged once.
+    decision.verdict = MusicBeeperBlitVerdict::Unavailable;
+    decision.log = !watch.unavailableLogged;
+    watch.unavailableLogged = true;
+    return decision;
+}

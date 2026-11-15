@@ -105,6 +105,12 @@ struct MusicGlueState {
     MusicDibBlitTracker dibBlit;
     // The eight shipped menu items, kept before the in-place write so unloading restores them.
     uint8_t shippedMenuSlots[kGraphicsMenuSlotsSize] = {};
+    // Next to another mod: menu 19 is not the shipped one (logged once), the beeper's race-frame blit
+    // watch, and the once-per-second re-hook check of chained sites (OtherModsCompat=1 only).
+    bool menu19ChangedLogged = false;
+    bool insideRacePresent = false;
+    MusicBeeperBlitWatch beeperBlit;
+    rr95::ChainedSiteCheckClock chainedSiteClock;
 };
 
 MusicGlueState g_music;
@@ -1117,7 +1123,8 @@ int __fastcall ReproductorMenuSelect(void* /*item*/) {
 // Fallback without the general mod (S4)
 // ---------------------------------------------------------------------------
 // The general mod detours the same three engine sites; the music mod installs its own only when the
-// binding decision says it owns that capability, so two DLLs never patch the same bytes. The bytes
+// binding decision says it owns that capability. A site another mod already detoured is refused, or
+// chained onto that mod's jump with the experimental OtherModsCompat=1 (hook_chain.h). The bytes
 // are the same as the general mod's table (renderer/src/hook_sites.cpp), and check_hook_sites.py
 // cross-checks both tables.
 rr95::HookSite g_siteFallbackRacePresent{
@@ -1201,7 +1208,18 @@ void __fastcall DetourFallbackRacePresent(uint8_t* buffer, int pitch, int palett
     ++g_music.frameSequence;
     MusicGlueOnRaceFrame();
     if (g_origFallbackRacePresent) {
+        g_music.insideRacePresent = true;
         g_origFallbackRacePresent(buffer, pitch, palette);
+        g_music.insideRacePresent = false;
+    }
+    // Next to a mod that renders the game itself, the present may never reach GDI: say so once.
+    const MusicBeeperBlitDecision blit =
+        OnMusicBeeperRaceFrame(g_music.beeperBlit, g_music.gdiOverlayInstalled, GetTickCount64());
+    if (blit.log) {
+        LOG_WARN("Music: no race frame reached GDI32!StretchDIBits within %u s; another mod draws the game "
+                 "(for example with Direct3D), so the beeper cannot be drawn next to it. Music and hotkeys "
+                 "keep working",
+                 static_cast<unsigned>(kMusicBeeperBlitTimeoutMs / 1000));
     }
 }
 
@@ -1286,11 +1304,21 @@ bool BlendMusicOverlayIntoPresentDib(const VOID* bits, const BITMAPINFO* info, M
     return true;
 }
 
+// True when bits is the game's own 32-bit DIB, the buffer its race present blits.
+bool IsGameDib(const VOID* bits) {
+    int dibPointer = 0;
+    return bits != nullptr && engine::ReadInt(engine::kDibBuffer, dibPointer) && dibPointer != 0 &&
+           reinterpret_cast<const VOID*>(static_cast<uintptr_t>(static_cast<uint32_t>(dibPointer))) == bits;
+}
+
 int WINAPI DetourStretchDIBits(HDC hdc, int xDest, int yDest, int destWidth, int destHeight, int xSrc, int ySrc,
                                int srcWidth, int srcHeight, const VOID* bits, const BITMAPINFO* info,
                                UINT usage, DWORD rop) {
     if (g_origStretchDIBits == nullptr) {
         return 0;
+    }
+    if (g_music.insideRacePresent && IsGameDib(bits)) {
+        NoteMusicBeeperRaceBlit(g_music.beeperBlit);
     }
     MusicDibSavedRegion saved;
     const bool canBlend = BeginMusicDibBlit(g_music.dibBlit, g_music.frameSequence);
@@ -1302,6 +1330,19 @@ int WINAPI DetourStretchDIBits(HDC hdc, int xDest, int yDest, int destWidth, int
     }
     EndMusicDibBlit(g_music.dibBlit, canBlend);
     return result;
+}
+
+// The count of menu 19 and the menu table's pointer to its items, as the game holds them now.
+MusicMenu19Inputs ReadMusicMenu19Inputs() {
+    MusicMenu19Inputs inputs;
+    int count = 0;
+    int tableItems = 0;
+    inputs.countRead = engine::ReadInt(kVaGraphicsMenuCount, count);
+    inputs.count = count;
+    inputs.tableRead = engine::ReadInt(kVaGraphicsMenuTableItems, tableItems);
+    inputs.tableItems = static_cast<uint32_t>(tableItems);
+    inputs.expectedItems = static_cast<uint32_t>(engine::Rebase(kVaGraphicsMenuItems));
+    return inputs;
 }
 
 bool MenuSlotsAreShipped() {
@@ -1325,6 +1366,18 @@ bool InstallMusicMenuInPlace(const Decisions& decisions) {
              plan.action == MusicMenuInPlaceAction::NotShipped)) {
             g_music.fallbackMenuWarningLogged = true;
             LOG_INFO("%s", plan.logMessage);
+        }
+        return false;
+    }
+    // Next to a mod that relocates menu 19 (a GPU mod with its own rows) the shipped array is no
+    // longer the live menu: the row is skipped and logged once, and music and hotkeys keep working.
+    const MusicMenu19Inputs shapeInputs = ReadMusicMenu19Inputs();
+    const MusicMenu19Decision shape = DecideMusicMenu19Shape(shapeInputs, g_music.menu19ChangedLogged);
+    if (!shape.writeRow) {
+        if (shape.log) {
+            g_music.menu19ChangedLogged = true;
+            LOG_WARN("%s (count %d, table 0x%08X, shipped items 0x%08X)", shape.logMessage, shapeInputs.count,
+                     shapeInputs.tableItems, shapeInputs.expectedItems);
         }
         return false;
     }
@@ -1402,7 +1455,7 @@ void InstallMusicFallbackHooks(const Decisions& decisions, const RR95ModApi* api
         }
         fallback.site->detour = fallback.detour;
         fallback.site->originalTrampoline = fallback.trampoline;
-        if (rr95::InstallHook(*fallback.site, module)) {
+        if (rr95::InstallHook(*fallback.site, module, GetMusicConfig().otherModsCompat)) {
             LOG_INFO("Music: fallback hook on %s installed (%s)", fallback.site->name,
                      CapabilityToString(fallback.capability));
         } else {
@@ -1433,16 +1486,50 @@ void RemoveMusicFallbackHooks() {
     HMODULE module = static_cast<HMODULE>(g_hostModule);
     rr95::RemoveIatHook(g_iatDibBlend);
     g_music.gdiOverlayInstalled = false;
+    // RemoveHook clears each trampoline pointer it frees. A chained site another mod rewrote keeps
+    // its trampoline, because that mod may still jump into the detour that forwards through it.
     for (const MusicFallbackSite& fallback : kMusicFallbackSites) {
         rr95::RemoveHook(*fallback.site, module);
     }
-    g_origFallbackRacePresent = nullptr;
-    g_origFallbackMenuPresent = nullptr;
-    g_origFallbackItemText = nullptr;
     g_music.fallbackRacePresentInstalled = false;
     g_music.fallbackMenuPresentInstalled = false;
     g_music.fallbackItemTextInstalled = false;
     RestoreMusicMenuInPlace();
+}
+
+// Experimental OtherModsCompat: at most once per second, every chained site must still hold our E9.
+// A site another mod rewrote is logged once by MonitorChainedHook and its state is no longer used;
+// nothing is reinstalled.
+void MonitorChainedHooks() {
+    rr95::HookSite* const sites[] = {&g_siteMidiResume,         &g_siteStreamResume,
+                                     &g_siteRaceMusicStart,     &g_siteRashButton,
+                                     &g_siteFallbackRacePresent, &g_siteFallbackMenuPresent,
+                                     &g_siteFallbackItemText};
+    bool anyChained = false;
+    for (const rr95::HookSite* site : sites) {
+        anyChained = anyChained || (site->installed && site->chained && !site->chainWatch.lost);
+    }
+    if (!rr95::ShouldRunChainedSiteCheck(g_music.chainedSiteClock, GetMusicConfig().otherModsCompat, anyChained,
+                                         GetTickCount64())) {
+        return;
+    }
+    HMODULE module = static_cast<HMODULE>(g_hostModule);
+    for (rr95::HookSite* site : sites) {
+        if (!rr95::MonitorChainedHook(*site, module)) {
+            continue;
+        }
+        // Stop using what the lost site provided. Key capture needs the RashButton detour to swallow
+        // menu input, so it turns read-only; the present and item-text flags stop counting as owned.
+        if (site == &g_siteRashButton) {
+            g_music.keyCaptureSafe = false;
+        } else if (site == &g_siteFallbackRacePresent) {
+            g_music.fallbackRacePresentInstalled = false;
+        } else if (site == &g_siteFallbackMenuPresent) {
+            g_music.fallbackMenuPresentInstalled = false;
+        } else if (site == &g_siteFallbackItemText) {
+            g_music.fallbackItemTextInstalled = false;
+        }
+    }
 }
 
 }  // namespace
@@ -1452,10 +1539,12 @@ int InstallMusicPlayerHooks(void* hostModule) {
     engine::SetHostModule(hostModule);
     HMODULE module = static_cast<HMODULE>(hostModule);
     int installed = 0;
+    // Experimental: chain onto another mod's hook on the same routine instead of refusing it.
+    const bool otherModsCompat = GetMusicConfig().otherModsCompat;
 
     g_siteMidiResume.detour = reinterpret_cast<void*>(&DetourMidiResume);
     g_siteMidiResume.originalTrampoline = reinterpret_cast<void**>(&g_origMidiResume);
-    if (rr95::InstallHook(g_siteMidiResume, module)) {
+    if (rr95::InstallHook(g_siteMidiResume, module, otherModsCompat)) {
         ++installed;
         LOG_INFO("Music: native MIDI resume hook on FUN_00445ba0 installed");
     } else {
@@ -1465,7 +1554,7 @@ int InstallMusicPlayerHooks(void* hostModule) {
 
     g_siteStreamResume.detour = reinterpret_cast<void*>(&DetourStreamResume);
     g_siteStreamResume.originalTrampoline = reinterpret_cast<void**>(&g_origStreamResume);
-    if (rr95::InstallHook(g_siteStreamResume, module)) {
+    if (rr95::InstallHook(g_siteStreamResume, module, otherModsCompat)) {
         ++installed;
         LOG_INFO("Music: native stream resume hook on FUN_00411c00 installed");
     } else {
@@ -1475,7 +1564,7 @@ int InstallMusicPlayerHooks(void* hostModule) {
 
     g_siteRaceMusicStart.detour = reinterpret_cast<void*>(&DetourRaceMusicStart);
     g_siteRaceMusicStart.originalTrampoline = reinterpret_cast<void**>(&g_origRaceMusicStart);
-    if (rr95::InstallHook(g_siteRaceMusicStart, module)) {
+    if (rr95::InstallHook(g_siteRaceMusicStart, module, otherModsCompat)) {
         ++installed;
         LOG_INFO("Music: race music start hook on FUN_004463a0 installed");
     } else {
@@ -1487,7 +1576,7 @@ int InstallMusicPlayerHooks(void* hostModule) {
     // later through the general mod's API; without this hook the key rows stay read-only.
     g_siteRashButton.detour = reinterpret_cast<void*>(&DetourRashButton);
     g_siteRashButton.originalTrampoline = reinterpret_cast<void**>(&g_origRashButton);
-    g_music.keyCaptureSafe = rr95::InstallHook(g_siteRashButton, module);
+    g_music.keyCaptureSafe = rr95::InstallHook(g_siteRashButton, module, otherModsCompat);
     if (g_music.keyCaptureSafe) {
         ++installed;
         LOG_INFO("Music: RashButton hook on FUN_0043cea0 installed; the Reproductor key rows can capture");
@@ -1506,10 +1595,6 @@ void RemoveMusicPlayerHooks(void* hostModule) {
     rr95::RemoveHook(g_siteStreamResume, module);
     rr95::RemoveHook(g_siteRaceMusicStart, module);
     rr95::RemoveHook(g_siteRashButton, module);
-    g_origMidiResume = nullptr;
-    g_origStreamResume = nullptr;
-    g_origRaceMusicStart = nullptr;
-    g_origRashButton = nullptr;
     g_music.keyCaptureSafe = false;
     g_music.keyCapture = EndMusicKeyCapture();
 }
@@ -1740,6 +1825,7 @@ bool MusicGlueMenuRowRegistered() {
 }
 
 void MusicGlueOnRaceFrame() {
+    MonitorChainedHooks();
     if (!EnsureMusicInitialized()) {
         return;
     }
@@ -1749,6 +1835,7 @@ void MusicGlueOnRaceFrame() {
 }
 
 void MusicGlueOnMenuFrame() {
+    MonitorChainedHooks();
     MusicOnMenuPresent();
 }
 

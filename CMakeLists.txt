@@ -41,6 +41,7 @@ set(RRMP_PLAYER_SOURCES
   src/audio_decoders_impl.cpp
   src/stb_vorbis_impl.c
   src/dsound_exports.cpp
+  src/shared/hook_chain.cpp
   src/shared/log.cpp
 )
 
@@ -62,10 +63,12 @@ target_compile_definitions(dsound PRIVATE ${RRMP_COMMON_DEFINITIONS})
 target_link_libraries(dsound PRIVATE bcrypt ole32)
 target_link_options(dsound PRIVATE /IGNORE:4104 /IGNORE:4222)
 
-# Unit test: binding decision, early import hook, [Music] ini, player, menu, overlay, exports -----
+# Unit test: binding decision, early import hook, [Music] ini, player, menu, overlay, exports and the
+# chained hook engine (src/shared/hook.cpp runs against the test's own executable buffers) ---------
 add_executable(music_test
   tests/music_test.cpp
   ${RRMP_PLAYER_SOURCES}
+  src/shared/hook.cpp
 )
 target_compile_options(music_test PRIVATE ${RRMP_COMMON_OPTIONS})
 target_compile_definitions(music_test PRIVATE ${RRMP_COMMON_DEFINITIONS}

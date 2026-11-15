@@ -800,4 +800,28 @@ MusicBeeperMenuDecision DecideMusicBeeperMenu(MusicOverlayMode configured, bool 
     return decision;
 }
 
+MusicMenu19Decision DecideMusicMenu19Shape(const MusicMenu19Inputs& inputs, bool alreadyLogged) {
+    MusicMenu19Decision decision;
+    if (!inputs.countRead || !inputs.tableRead) {
+        decision.shape = MusicMenu19Shape::Unreadable;
+        decision.logMessage = "Music: graphics menu 19 cannot be read; the Reproductor row is skipped, music "
+                              "and hotkeys keep working";
+    } else if (inputs.count != static_cast<int32_t>(kGraphicsMenuCount)) {
+        decision.shape = MusicMenu19Shape::CountChanged;
+        decision.logMessage = "Music: another mod changed graphics menu 19 (its item count is not 8); the "
+                              "Reproductor row is skipped, music and hotkeys keep working";
+    } else if (inputs.tableItems != inputs.expectedItems) {
+        decision.shape = MusicMenu19Shape::TableMoved;
+        decision.logMessage = "Music: another mod moved graphics menu 19 (the menu table no longer points at "
+                              "the shipped items); the Reproductor row is skipped, music and hotkeys keep "
+                              "working";
+    } else {
+        decision.shape = MusicMenu19Shape::Shipped;
+        decision.writeRow = true;
+        return decision;
+    }
+    decision.log = !alreadyLogged;
+    return decision;
+}
+
 }  // namespace rr95::music

@@ -97,8 +97,12 @@ void EnsureInitialized() {
         LogInit(logPath, cfg.logLevel);
 
         LOG_INFO("rr95music proxy dsound.dll loaded");
-        LOG_INFO("Config: Music.Enabled=%d, Music.LogLevel=%d", cfg.enabled ? 1 : 0,
-                 static_cast<int>(cfg.logLevel));
+        LOG_INFO("Config: Music.Enabled=%d, Music.LogLevel=%d, Music.OtherModsCompat=%d", cfg.enabled ? 1 : 0,
+                 static_cast<int>(cfg.logLevel), cfg.otherModsCompat ? 1 : 0);
+        if (cfg.enabled && cfg.otherModsCompat) {
+            LOG_WARN("Config: OtherModsCompat=1 is EXPERIMENTAL: hooks other mods already installed on the "
+                     "same game routines are chained instead of refused. Set OtherModsCompat=0 to turn it off");
+        }
         g_musicEnabled = cfg.enabled;
         if (!cfg.enabled) {
             LOG_INFO("Music disabled by config: forwarding only, no binding");
