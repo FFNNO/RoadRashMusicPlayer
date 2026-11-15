@@ -675,6 +675,24 @@ MusicMenuRowOwner DecideMusicMenuRowOwner(int32_t menuState, bool apiRowRegister
     }
 }
 
+bool ShouldClearMusicItemTextProvider(bool providerRegistered, int32_t menuState,
+                                      bool itemTextDetourInstalled) {
+    if (!providerRegistered) {
+        return false;
+    }
+    switch (menuState) {
+        case RR95_MENU_STATE_NOT_USED:
+        case RR95_MENU_STATE_FAILED:
+            return true;  // the relocated menu is never drawn: the in-place row takes over
+        case RR95_MENU_STATE_APPLIED:
+            return !itemTextDetourInstalled;  // the general mod never asks the provider
+        case RR95_MENU_STATE_PENDING:
+        case RR95_MENU_STATE_UNKNOWN:
+        default:
+            return false;  // the API row is still the live one
+    }
+}
+
 MusicMenuInPlacePlan PlanMusicMenuInPlace(bool ownRow, bool ownItemText, bool shippedMatches,
                                          bool installed) {
     MusicMenuInPlacePlan plan;

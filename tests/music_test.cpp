@@ -20,6 +20,7 @@
 #include "../src/audio_decoders.h"
 #include "../src/binding.h"
 #include "../src/dsound_exports.h"
+#include "../src/early_hook.h"
 #include "../src/hotkey.h"
 #include "../src/music_config.h"
 #include "../src/music_game.h"
@@ -865,6 +866,283 @@ void TestMusicEarlyRow() {
           "binding S5: pending and applied menus use the early API row");
     Check(DecideMusicMenuRowOwner(RR95_MENU_STATE_NOT_USED, false, false) == MusicMenuRowOwner::None,
           "binding S5: no row exists when neither registration happened");
+}
+
+// Review fix: the early IAT path against a synthetic in-memory PE image. The image has a decoy
+// KERNEL32.dll descriptor that also imports a "DirectDrawCreate" name, then DDRAW.dll with an ordinal
+// import, DirectDrawEnumerateA and DirectDrawCreate (index 2).
+constexpr uint32_t kSyntheticImageSize = 0x1000;
+constexpr uint32_t kSyntheticImportDir = 0x200;
+constexpr uint32_t kSyntheticDdrawNames = 0x400;
+constexpr uint32_t kSyntheticDdrawIat = 0x500;
+constexpr uint32_t kSyntheticKernelNames = 0x440;
+constexpr uint32_t kSyntheticKernelIat = 0x540;
+constexpr uint32_t kSyntheticBoundAddress = 0x7FFE1230;  // outside the image: a bound IAT entry
+
+enum class SyntheticDdrawThunks {
+    NameTable,        // OriginalFirstThunk names the functions, FirstThunk holds bound pointers
+    FirstThunkNames,  // OriginalFirstThunk is 0 and FirstThunk still holds the name RVAs
+    FirstThunkBound   // OriginalFirstThunk is 0 and the loader already bound FirstThunk
+};
+
+HRESULT WINAPI FakeDirectDrawEnumerate(GUID*, IDirectDraw**, IUnknown*) {
+    return E_NOTIMPL;
+}
+
+int g_fakeDirectDrawCalls = 0;
+GUID* g_fakeDirectDrawGuid = nullptr;
+IDirectDraw** g_fakeDirectDrawOut = nullptr;
+IUnknown* g_fakeDirectDrawOuter = nullptr;
+constexpr HRESULT kFakeDirectDrawResult = static_cast<HRESULT>(0x0000BEEF);
+
+HRESULT WINAPI FakeDirectDrawCreate(GUID* guid, IDirectDraw** out, IUnknown* outer) {
+    ++g_fakeDirectDrawCalls;
+    g_fakeDirectDrawGuid = guid;
+    g_fakeDirectDrawOut = out;
+    g_fakeDirectDrawOuter = outer;
+    return kFakeDirectDrawResult;
+}
+
+HRESULT WINAPI OtherChainDirectDrawCreate(GUID*, IDirectDraw**, IUnknown*) {
+    return S_OK;
+}
+
+void PutSyntheticName(uint8_t* base, uint32_t rva, const char* text) {
+    std::memcpy(base + rva, text, std::strlen(text) + 1);
+}
+
+void PutSyntheticImportByName(uint8_t* base, uint32_t rva, const char* name) {
+    base[rva] = 0;  // hint
+    base[rva + 1] = 0;
+    PutSyntheticName(base, rva + 2, name);
+}
+
+void BuildSyntheticImportImage(uint8_t* base, SyntheticDdrawThunks thunks) {
+    std::memset(base, 0, kSyntheticImageSize);
+    auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+    dos->e_magic = IMAGE_DOS_SIGNATURE;
+    dos->e_lfanew = 0x40;
+    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+    nt->Signature = IMAGE_NT_SIGNATURE;
+    nt->FileHeader.Machine = IMAGE_FILE_MACHINE_I386;
+    nt->FileHeader.SizeOfOptionalHeader = sizeof(IMAGE_OPTIONAL_HEADER);
+    nt->OptionalHeader.Magic = IMAGE_NT_OPTIONAL_HDR_MAGIC;
+    nt->OptionalHeader.SizeOfImage = kSyntheticImageSize;
+    nt->OptionalHeader.NumberOfRvaAndSizes = IMAGE_NUMBEROF_DIRECTORY_ENTRIES;
+    nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress = kSyntheticImportDir;
+    nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].Size =
+        3 * sizeof(IMAGE_IMPORT_DESCRIPTOR);
+
+    PutSyntheticName(base, 0x300, "KERNEL32.dll");
+    PutSyntheticName(base, 0x310, "DDRAW.dll");
+    PutSyntheticImportByName(base, 0x340, "DirectDrawEnumerateA");
+    PutSyntheticImportByName(base, 0x360, "DirectDrawCreate");
+    PutSyntheticImportByName(base, 0x380, "DirectDrawCreate");
+
+    auto* descriptors = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + kSyntheticImportDir);
+    descriptors[0].OriginalFirstThunk = kSyntheticKernelNames;
+    descriptors[0].Name = 0x300;
+    descriptors[0].FirstThunk = kSyntheticKernelIat;
+    descriptors[1].Name = 0x310;
+    descriptors[1].FirstThunk = kSyntheticDdrawIat;
+
+    auto* kernelNames = reinterpret_cast<uint32_t*>(base + kSyntheticKernelNames);
+    auto* kernelIat = reinterpret_cast<uint32_t*>(base + kSyntheticKernelIat);
+    kernelNames[0] = 0x380;
+    kernelIat[0] = kSyntheticBoundAddress;
+
+    const uint32_t names[3] = {IMAGE_ORDINAL_FLAG32 | 5u, 0x340, 0x360};
+    const uint32_t bound[3] = {
+        kSyntheticBoundAddress,
+        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&FakeDirectDrawEnumerate)),
+        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&FakeDirectDrawCreate))};
+    auto* ddrawNames = reinterpret_cast<uint32_t*>(base + kSyntheticDdrawNames);
+    auto* ddrawIat = reinterpret_cast<uint32_t*>(base + kSyntheticDdrawIat);
+    for (int i = 0; i < 3; ++i) {
+        switch (thunks) {
+        case SyntheticDdrawThunks::NameTable:
+            ddrawNames[i] = names[i];
+            ddrawIat[i] = bound[i];
+            break;
+        case SyntheticDdrawThunks::FirstThunkNames:
+            ddrawIat[i] = names[i];
+            break;
+        case SyntheticDdrawThunks::FirstThunkBound:
+            ddrawIat[i] = i == 0 ? names[0] : kSyntheticBoundAddress + static_cast<uint32_t>(i);
+            break;
+        }
+    }
+    if (thunks == SyntheticDdrawThunks::NameTable) {
+        descriptors[1].OriginalFirstThunk = kSyntheticDdrawNames;
+    }
+}
+
+bool PlainStoreImportPointer(void** slot, void* value) {
+    *slot = value;
+    return true;
+}
+
+bool FailingStoreImportPointer(void**, void*) {
+    return false;
+}
+
+EarlyImportHook g_testEarlyHook;
+int g_earlyFirstCalls = 0;
+int g_earlyFirstCallSawForwards = -1;
+
+void CountEarlyFirstCall(void* ctx) {
+    ++*static_cast<int*>(ctx);
+    g_earlyFirstCallSawForwards = g_fakeDirectDrawCalls;
+}
+
+HRESULT WINAPI TestEarlyDirectDrawDetour(GUID* guid, IDirectDraw** out, IUnknown* outer) {
+    return ForwardEarlyImportCall<DirectDrawCreateFn>(g_testEarlyHook, &CountEarlyFirstCall, &g_earlyFirstCalls,
+                                                      E_FAIL, guid, out, outer);
+}
+
+void TestEarlyImportHook() {
+    alignas(16) static uint8_t image[kSyntheticImageSize];
+    void* const expectedSlot = image + kSyntheticDdrawIat + 2 * sizeof(uint32_t);
+
+    // Import-slot lookup.
+    BuildSyntheticImportImage(image, SyntheticDdrawThunks::NameTable);
+    Check(FindImportSlot(image, "DDRAW.dll", "DirectDrawCreate") == expectedSlot,
+          "early hook: the lookup finds DDRAW.dll!DirectDrawCreate through OriginalFirstThunk");
+    Check(FindImportSlot(image, "ddraw.dll", "directdrawcreate") == expectedSlot,
+          "early hook: the DLL and function names compare case-insensitively");
+    Check(FindImportSlot(image, "DDRAW.dll", "DirectDrawCreateEx") == nullptr &&
+              FindImportSlot(image, "DSOUND.dll", "DirectDrawCreate") == nullptr,
+          "early hook: a missing function or DLL has no slot");
+    Check(FindImportSlot(nullptr, "DDRAW.dll", "DirectDrawCreate") == nullptr,
+          "early hook: a null image has no slot");
+
+    BuildSyntheticImportImage(image, SyntheticDdrawThunks::FirstThunkNames);
+    Check(FindImportSlot(image, "DDRAW.dll", "DirectDrawCreate") == expectedSlot,
+          "early hook: OriginalFirstThunk 0 falls back to the FirstThunk names, like check_hook_sites.py");
+    BuildSyntheticImportImage(image, SyntheticDdrawThunks::FirstThunkBound);
+    Check(FindImportSlot(image, "DDRAW.dll", "DirectDrawCreate") == nullptr,
+          "early hook: OriginalFirstThunk 0 with a bound FirstThunk skips the bound entries safely");
+
+    // Install, detour forwarding and the run-once registration.
+    BuildSyntheticImportImage(image, SyntheticDdrawThunks::NameTable);
+    void** slot = FindImportSlot(image, "DDRAW.dll", "DirectDrawCreate");
+    Check(slot != nullptr, "early hook: the slot for the install tests is found");
+    if (slot == nullptr) {
+        return;
+    }
+    void* const detour = reinterpret_cast<void*>(&TestEarlyDirectDrawDetour);
+    Check(!InstallEarlyImportHook(g_testEarlyHook, nullptr, detour, &PlainStoreImportPointer),
+          "early hook: no slot installs nothing");
+    Check(!InstallEarlyImportHook(g_testEarlyHook, slot, detour, &FailingStoreImportPointer) &&
+              !g_testEarlyHook.installed.load() && g_testEarlyHook.previous.load() == nullptr &&
+              *slot == reinterpret_cast<void*>(&FakeDirectDrawCreate),
+          "early hook: a failed store leaves the hook uninstalled and the slot unchanged");
+    Check(InstallEarlyImportHook(g_testEarlyHook, slot, detour, &PlainStoreImportPointer),
+          "early hook: the hook installs into the found slot");
+    Check(*slot == detour &&
+              g_testEarlyHook.previous.load() == reinterpret_cast<void*>(&FakeDirectDrawCreate),
+          "early hook: the slot holds the detour and the previous pointer is saved");
+    Check(!InstallEarlyImportHook(g_testEarlyHook, slot, detour, &PlainStoreImportPointer),
+          "early hook: a slot that already holds the detour is never wrapped twice");
+
+    g_fakeDirectDrawCalls = 0;
+    g_earlyFirstCalls = 0;
+    GUID guid{};
+    IDirectDraw* out = nullptr;
+    auto* outer = reinterpret_cast<IUnknown*>(&guid);
+    const auto viaSlot = reinterpret_cast<DirectDrawCreateFn>(*slot);
+    const HRESULT first = viaSlot(&guid, &out, outer);
+    Check(first == kFakeDirectDrawResult && g_fakeDirectDrawCalls == 1,
+          "early hook: the detour calls the previous function and returns its result unchanged");
+    Check(g_fakeDirectDrawGuid == &guid && g_fakeDirectDrawOut == &out && g_fakeDirectDrawOuter == outer,
+          "early hook: the detour forwards the same arguments");
+    Check(g_earlyFirstCalls == 1 && g_earlyFirstCallSawForwards == 0,
+          "early hook: the first call runs the registration once, before the original DirectDrawCreate");
+    const HRESULT second = viaSlot(nullptr, nullptr, nullptr);
+    Check(second == kFakeDirectDrawResult && g_fakeDirectDrawCalls == 2 && g_earlyFirstCalls == 1,
+          "early hook: a later call only forwards; the registration never runs again");
+
+    // Conditional restore.
+    Check(RestoreEarlyImportHook(g_testEarlyHook, detour, &PlainStoreImportPointer) &&
+              *slot == reinterpret_cast<void*>(&FakeDirectDrawCreate) && !g_testEarlyHook.installed.load(),
+          "early hook: detach restores the slot while it still holds the detour");
+    Check(!RestoreEarlyImportHook(g_testEarlyHook, detour, &PlainStoreImportPointer),
+          "early hook: a second detach does nothing");
+
+    EarlyImportHook wrapped;
+    Check(InstallEarlyImportHook(wrapped, slot, detour, &PlainStoreImportPointer),
+          "early hook: the hook installs again after a restore");
+    *slot = reinterpret_cast<void*>(&OtherChainDirectDrawCreate);  // another chain wrapped the slot
+    Check(!RestoreEarlyImportHook(wrapped, detour, &PlainStoreImportPointer) &&
+              *slot == reinterpret_cast<void*>(&OtherChainDirectDrawCreate) && !wrapped.installed.load(),
+          "early hook: detach never overwrites a slot another chain wrapped");
+
+    EarlyImportHook empty;
+    const HRESULT missing = ForwardEarlyImportCall<DirectDrawCreateFn>(
+        empty, nullptr, nullptr, E_FAIL, nullptr, nullptr, nullptr);
+    Check(missing == E_FAIL, "early hook: a detour without a saved function returns the given failure");
+
+    // The production store on a read-only page, like the exe's .idata section.
+    auto* page = static_cast<uint8_t*>(VirtualAlloc(nullptr, kSyntheticImageSize, MEM_COMMIT | MEM_RESERVE,
+                                                    PAGE_READWRITE));
+    Check(page != nullptr, "early hook: a page for the read-only image is allocated");
+    if (page == nullptr) {
+        return;
+    }
+    BuildSyntheticImportImage(page, SyntheticDdrawThunks::NameTable);
+    DWORD oldProtect = 0;
+    VirtualProtect(page, kSyntheticImageSize, PAGE_READONLY, &oldProtect);
+    void** readOnlySlot = FindImportSlot(page, "DDRAW.dll", "DirectDrawCreate");
+    EarlyImportHook readOnly;
+    const bool installed = InstallEarlyImportHook(readOnly, readOnlySlot, detour, &StoreImportPointer);
+    MEMORY_BASIC_INFORMATION info{};
+    VirtualQuery(readOnlySlot, &info, sizeof(info));
+    Check(installed && *readOnlySlot == detour && info.Protect == PAGE_READONLY,
+          "early hook: the production store writes a read-only slot and restores its protection");
+    const bool restored = RestoreEarlyImportHook(readOnly, detour, &StoreImportPointer);
+    VirtualQuery(readOnlySlot, &info, sizeof(info));
+    Check(restored && *readOnlySlot == reinterpret_cast<void*>(&FakeDirectDrawCreate) &&
+              info.Protect == PAGE_READONLY,
+          "early hook: the production restore puts the read-only slot back");
+    VirtualFree(page, 0, MEM_RELEASE);
+}
+
+// Review fix: an item text provider registered with the early row is cleared when the general mod
+// will not draw the relocated menu with its item-text detour, before the in-place fallback runs.
+void TestEarlyItemTextProviderClear() {
+    Check(ShouldClearMusicItemTextProvider(true, RR95_MENU_STATE_NOT_USED, true),
+          "early provider: NOT_USED clears the API item text provider");
+    Check(ShouldClearMusicItemTextProvider(true, RR95_MENU_STATE_FAILED, true),
+          "early provider: FAILED clears the API item text provider");
+    Check(ShouldClearMusicItemTextProvider(true, RR95_MENU_STATE_APPLIED, false),
+          "early provider: APPLIED without the item-text detour clears the API item text provider");
+    Check(!ShouldClearMusicItemTextProvider(true, RR95_MENU_STATE_APPLIED, true),
+          "early provider: APPLIED with the item-text detour keeps the provider");
+    Check(!ShouldClearMusicItemTextProvider(true, RR95_MENU_STATE_PENDING, false) &&
+              !ShouldClearMusicItemTextProvider(true, RR95_MENU_STATE_UNKNOWN, false),
+          "early provider: PENDING and UNKNOWN keep the provider");
+    Check(!ShouldClearMusicItemTextProvider(false, RR95_MENU_STATE_NOT_USED, false),
+          "early provider: nothing is cleared when no provider was registered");
+
+    // Every state that clears the provider is one where the binding hands the item text to the
+    // fallback, so the in-place row never runs beside a live API provider.
+    const int32_t states[] = {RR95_MENU_STATE_NOT_USED, RR95_MENU_STATE_PENDING, RR95_MENU_STATE_APPLIED,
+                              RR95_MENU_STATE_FAILED, RR95_MENU_STATE_UNKNOWN};
+    bool consistent = true;
+    for (const int32_t state : states) {
+        for (const bool detour : {false, true}) {
+            BindingInputs bind;
+            bind.musicEnabled = true;
+            bind.exeSupported = true;
+            bind.apiAvailable = true;
+            bind.hookState = RR95_HOOK_STATE_ACTIVE;
+            bind.menuState = state;
+            bind.itemTextDetourInstalled = detour;
+            const bool ownItemText = ShouldInstallFallbackSite(DecideBindings(bind), Capability::ItemText);
+            consistent = consistent && ShouldClearMusicItemTextProvider(true, state, detour) == ownItemText;
+        }
+    }
+    Check(consistent, "early provider: the provider is cleared exactly when the fallback owns the item text");
 }
 
 // S5 fix: the loader-lock safe [Music] Enabled probe used by DllMain before the early IAT hook.
@@ -4874,6 +5152,8 @@ int main() {
     TestApiTableValidation();
     TestBindingRetry();
     TestMusicEarlyRow();
+    TestEarlyImportHook();
+    TestEarlyItemTextProviderClear();
     TestMusicConfig();
     TestMusicEnabledIniProbe();
     TestExportTable();

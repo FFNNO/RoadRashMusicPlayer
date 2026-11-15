@@ -73,6 +73,8 @@ struct MusicGlueState {
     // decision can tell it from the in-place fallback row.
     bool apiRowRegistered = false;
     bool earlyRowRegistered = false;
+    // Review fix: the item text provider registered with the API row, until it is cleared again.
+    bool apiItemTextProviderRegistered = false;
     MusicMenuRowOwner menuRowOwner = MusicMenuRowOwner::None;
     // The in-place row's own "shipped bytes do not match" line; the API gate has its two flags below.
     bool menuRowWarningLogged = false;
@@ -1542,6 +1544,7 @@ bool TryRegisterMusicMenuRow(const RR95ModApi* api) {
     }
     g_music.menuRowRegistered = true;
     g_music.apiRowRegistered = true;
+    g_music.apiItemTextProviderRegistered = true;
     g_music.menuRowFailure = MusicMenuRowFailure::None;
     g_music.menuRowStatus = 0;
     return true;
@@ -1550,6 +1553,21 @@ bool TryRegisterMusicMenuRow(const RR95ModApi* api) {
 void MusicGlueApplyDecision(const Decisions& decisions, const RR95ModApi* api) {
     if (!MusicProxyEnabled()) {
         return;
+    }
+    // Review fix: the API row registration (early at DirectDrawCreate, or here) also registered the
+    // item text provider. When the general mod reports NOT_USED or FAILED, or APPLIED without its
+    // item-text detour, that provider is cleared before the in-place fallback takes the row and the
+    // item text, so no stale provider stays live in the general mod.
+    if (api != nullptr &&
+        ShouldClearMusicItemTextProvider(g_music.apiItemTextProviderRegistered, api->getMenuState(),
+                                         api->isItemTextDetourInstalled() != 0)) {
+        const int32_t status = api->registerItemTextProvider(nullptr, nullptr);
+        g_music.apiItemTextProviderRegistered = false;
+        if (status == RR95_STATUS_OK) {
+            LOG_INFO("Music: the API item text provider is cleared; the mod's own item text takes over");
+        } else {
+            LOG_WARN("Music: the general mod refused to clear the item text provider (status %d)", status);
+        }
     }
     // S4: the fallback sites, the in-place menu row and the GDI blend exist before the rest of the
     // plan runs, so the overlay and the row blocks below can report what actually happened.

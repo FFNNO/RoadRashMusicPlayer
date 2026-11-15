@@ -26,6 +26,7 @@ set_source_files_properties(
 # Player sources shared by the DLL and the unit test.
 set(RRMP_PLAYER_SOURCES
   src/binding.cpp
+  src/early_hook.cpp
   src/engine.cpp
   src/hotkey.cpp
   src/music_config.cpp
@@ -59,7 +60,7 @@ target_compile_definitions(dsound PRIVATE ${RRMP_COMMON_DEFINITIONS})
 target_link_libraries(dsound PRIVATE bcrypt ole32)
 target_link_options(dsound PRIVATE /IGNORE:4104 /IGNORE:4222)
 
-# Unit test: binding decision, [Music] ini, player, menu, overlay, exports -----
+# Unit test: binding decision, early import hook, [Music] ini, player, menu, overlay, exports -----
 add_executable(music_test
   tests/music_test.cpp
   ${RRMP_PLAYER_SOURCES}

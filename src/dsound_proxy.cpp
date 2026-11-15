@@ -12,6 +12,7 @@
 
 #include "binding.h"
 #include "dsound_exports.h"
+#include "early_hook.h"
 #include "music_config.h"
 #include "music_dsound.h"
 #include "music_glue.h"
@@ -239,98 +240,14 @@ void RunDecision(BindingTrigger trigger, const void* caller) {
 // .idata section is read-only. The detour's first call runs on the game thread after the loader
 // lock, so it may resolve the API and register the row there, before the original DirectDrawCreate
 // installs the general mod's hooks.
-using DirectDrawCreateFn = HRESULT(WINAPI*)(GUID*, LPDIRECTDRAW*, IUnknown*);
-
-DirectDrawCreateFn* g_directDrawSlot = nullptr;   // the exe import slot while the hook is installed
-DirectDrawCreateFn g_directDrawCreate = nullptr;  // the value the slot held before the hook
-std::atomic<bool> g_earlyHookInstalled{false};
-std::atomic<bool> g_earlyRowAttempted{false};
-
-bool AsciiEqualsIgnoreCase(const char* left, const char* right) {
-    while (*left != '\0' && *right != '\0') {
-        char a = *left;
-        char b = *right;
-        if (a >= 'A' && a <= 'Z') {
-            a = static_cast<char>(a - 'A' + 'a');
-        }
-        if (b >= 'A' && b <= 'Z') {
-            b = static_cast<char>(b - 'A' + 'a');
-        }
-        if (a != b) {
-            return false;
-        }
-        ++left;
-        ++right;
-    }
-    return *left == '\0' && *right == '\0';
-}
-
-// Walks the host's import descriptors by hand: no CRT string call, no module load, no allocation.
-DirectDrawCreateFn* FindImportSlot(HMODULE host, const char* dllName, const char* functionName) {
-    if (host == nullptr) {
-        return nullptr;
-    }
-    const auto* base = reinterpret_cast<const uint8_t*>(host);
-    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
-        return nullptr;
-    }
-    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE) {
-        return nullptr;
-    }
-    const IMAGE_DATA_DIRECTORY& directory =
-        nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
-    if (directory.VirtualAddress == 0 || directory.Size == 0) {
-        return nullptr;
-    }
-    const auto* descriptor =
-        reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(base + directory.VirtualAddress);
-    for (; descriptor->Name != 0; ++descriptor) {
-        if (!AsciiEqualsIgnoreCase(reinterpret_cast<const char*>(base + descriptor->Name), dllName)) {
-            continue;
-        }
-        if (descriptor->OriginalFirstThunk == 0) {
-            continue;  // no name table: this build binds by ordinals only
-        }
-        const auto* names =
-            reinterpret_cast<const IMAGE_THUNK_DATA*>(base + descriptor->OriginalFirstThunk);
-        auto* slots = reinterpret_cast<DirectDrawCreateFn*>(
-            const_cast<uint8_t*>(base) + descriptor->FirstThunk);
-        for (size_t i = 0; names[i].u1.AddressOfData != 0; ++i) {
-            if (IMAGE_SNAP_BY_ORDINAL(names[i].u1.Ordinal)) {
-                continue;
-            }
-            const auto* import =
-                reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(base + names[i].u1.AddressOfData);
-            if (AsciiEqualsIgnoreCase(reinterpret_cast<const char*>(import->Name), functionName)) {
-                return &slots[i];
-            }
-        }
-    }
-    return nullptr;
-}
-
-// Plain pointer store with the page protection lifted for the write only.
-bool StorePointer(void* slot, void* value) {
-    DWORD oldProtect = 0;
-    if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &oldProtect)) {
-        return false;
-    }
-    *reinterpret_cast<void**>(slot) = value;
-    DWORD ignored = 0;
-    VirtualProtect(slot, sizeof(void*), oldProtect, &ignored);
-    return true;
-}
+// The lookup, the store, the run-once flag and the conditional restore live in early_hook.cpp so the
+// unit test runs them against a synthetic import table.
+EarlyImportHook g_earlyHook;
 
 // Runs once, at the game's first DirectDrawCreate call: resolves the API, validates it and lets the
 // pure decision say whether the row may go in now. No API, a failed general mod, a menu it will not
 // relocate or a row already registered all leave the DirectSoundCreate binding to its fallbacks.
-void RunEarlyRowRegistration() {
-    bool expected = false;
-    if (!g_earlyRowAttempted.compare_exchange_strong(expected, true)) {
-        return;
-    }
+void RunEarlyRowRegistration(void*) {
     EnsureInitialized();
     if (!g_musicEnabled || !g_exeSupported) {
         return;
@@ -357,12 +274,8 @@ void RunEarlyRowRegistration() {
 }
 
 HRESULT WINAPI DetourEarlyDirectDrawCreate(GUID* guid, LPDIRECTDRAW* out, IUnknown* outer) {
-    RunEarlyRowRegistration();
-    const DirectDrawCreateFn previous = g_directDrawCreate;
-    if (previous == nullptr) {
-        return DDERR_GENERIC;
-    }
-    return previous(guid, out, outer);
+    return ForwardEarlyImportCall<DirectDrawCreateFn>(g_earlyHook, &RunEarlyRowRegistration, nullptr,
+                                                      static_cast<HRESULT>(DDERR_GENERIC), guid, out, outer);
 }
 
 }  // namespace
@@ -376,31 +289,15 @@ void MusicEarlyHookAttach(HMODULE module) {
     if (!ReadMusicEnabledIni(iniPath.c_str(), true)) {
         return;  // music off: forward only, and the slot is never touched
     }
-    DirectDrawCreateFn* slot = FindImportSlot(GetModuleHandleW(nullptr), "DDRAW.dll", "DirectDrawCreate");
-    if (slot == nullptr || *slot == nullptr || *slot == &DetourEarlyDirectDrawCreate) {
-        return;
-    }
-    g_directDrawCreate = *slot;
-    g_directDrawSlot = slot;
-    if (!StorePointer(slot, reinterpret_cast<void*>(&DetourEarlyDirectDrawCreate))) {
-        g_directDrawCreate = nullptr;
-        g_directDrawSlot = nullptr;
-        return;
-    }
-    g_earlyHookInstalled.store(true);
+    void** slot = FindImportSlot(GetModuleHandleW(nullptr), "DDRAW.dll", "DirectDrawCreate");
+    InstallEarlyImportHook(g_earlyHook, slot, reinterpret_cast<void*>(&DetourEarlyDirectDrawCreate),
+                           &StoreImportPointer);
 }
 
 void MusicEarlyHookDetach() {
-    if (!g_earlyHookInstalled.load()) {
-        return;
-    }
-    // Restore the slot only when it still holds the detour: another chain may have wrapped it.
-    if (g_directDrawSlot != nullptr && *g_directDrawSlot == &DetourEarlyDirectDrawCreate) {
-        StorePointer(g_directDrawSlot, reinterpret_cast<void*>(g_directDrawCreate));
-    }
-    g_directDrawSlot = nullptr;
-    g_directDrawCreate = nullptr;
-    g_earlyHookInstalled.store(false);
+    // The slot is restored only while it still holds the detour: another chain may have wrapped it.
+    RestoreEarlyImportHook(g_earlyHook, reinterpret_cast<void*>(&DetourEarlyDirectDrawCreate),
+                           &StoreImportPointer);
 }
 
 bool MusicProxyEnabled() {

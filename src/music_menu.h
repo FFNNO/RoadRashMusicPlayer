@@ -373,6 +373,13 @@ enum class MusicMenuRowOwner {
 MusicMenuRowOwner DecideMusicMenuRowOwner(int32_t menuState, bool apiRowRegistered,
                                           bool inPlaceInstalled);
 
+// Review fix: the API row registration (early, at DirectDrawCreate, while the menu state is UNKNOWN
+// or PENDING) also registers the item text provider. When the general mod later reports NOT_USED or
+// FAILED, or APPLIED without its item-text detour, the provider must be cleared (registered as null)
+// before the in-place fallback takes the row and the item text, so no stale provider stays live.
+bool ShouldClearMusicItemTextProvider(bool providerRegistered, int32_t menuState,
+                                      bool itemTextDetourInstalled);
+
 // ---------------------------------------------------------------------------
 // In-place graphics menu row (S4)
 // ---------------------------------------------------------------------------
