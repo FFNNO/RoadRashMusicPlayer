@@ -1,0 +1,154 @@
+# Builds dsound.dll and the Inno Setup installer on a clean GitHub runner.
+# - Every push to main and every pull request: build + unit tests + hook-site check, the setup and
+#   the zip kept as a workflow artifact.
+# - Every tag v*: same build, then a GitHub Release with the setup, a zip of dsound.dll,
+#   rr95music.ini, both READMEs and LICENSE, their SHA-256 and a build provenance attestation, so
+#   anyone can check the published files came from this commit.
+#   Verify a download with: gh attestation verify <file> --repo FFNNO/RoadRashMusicPlayer
+name: build-and-release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-2025
+    permissions:
+      contents: write      # create the release (tags only)
+      id-token: write      # sign the provenance attestation
+      attestations: write
+    env:
+      ISCC: C:\Program Files (x86)\Inno Setup 6\ISCC.exe
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $v = $env:GITHUB_REF_NAME -replace '^v', ''
+            if ($v -notmatch '^\d+\.\d+\.\d+([-.][0-9A-Za-z.]+)?$') { throw "Tag '$env:GITHUB_REF_NAME' is not vX.Y.Z" }
+          } else {
+            $v = "0.0.0-ci.$env:GITHUB_RUN_NUMBER"
+          }
+          "value=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "Version: $v"
+
+      - name: Configure (Win32, Release)
+        run: cmake -S . -B build -A Win32
+
+      - name: Build dsound.dll and music_test
+        run: cmake --build build --config Release
+
+      - name: Unit tests
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Hook-site check
+        shell: pwsh
+        run: |
+          # The game executables are never in the repository, so this reports skipped in CI.
+          python -I tools/check_hook_sites.py
+          if ($LASTEXITCODE -ne 0) { throw "check_hook_sites.py failed ($LASTEXITCODE)" }
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path $env:ISCC)) { choco install innosetup --no-progress -y }
+          if (-not (Test-Path $env:ISCC)) { throw "ISCC.exe not found at $env:ISCC" }
+
+      - name: Build installer and zip
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          & $env:ISCC /Q "/DAppVersion=$env:VERSION" installer\RoadRashMusicPlayer.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed ($LASTEXITCODE)" }
+          $setup = Get-Item "installer\Output\RoadRashMusicPlayer-Setup-$env:VERSION.exe"
+          $stage = "installer\Output\zip"
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item build\Release\dsound.dll, rr95music.ini, README.md, README.es.md, LICENSE $stage
+          $zip = "installer\Output\RoadRashMusicPlayer-$env:VERSION.zip"
+          Compress-Archive -Path "$stage\*" -DestinationPath $zip -Force
+          $lines = foreach ($file in @($setup, (Get-Item $zip))) {
+            $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($file.Name)"
+          }
+          $lines | Out-File -Encoding ascii "installer\Output\SHA256SUMS.txt"
+          Get-Content "installer\Output\SHA256SUMS.txt"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: RoadRashMusicPlayer-${{ steps.version.outputs.value }}
+          path: |
+            installer/Output/*.exe
+            installer/Output/*.zip
+            installer/Output/SHA256SUMS.txt
+            build/Release/dsound.dll
+          if-no-files-found: error
+
+      - name: Attest build provenance
+        if: github.ref_type == 'tag'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            installer/Output/RoadRashMusicPlayer-Setup-${{ steps.version.outputs.value }}.exe
+            installer/Output/RoadRashMusicPlayer-${{ steps.version.outputs.value }}.zip
+            build/Release/dsound.dll
+
+      - name: Publish GitHub Release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $setup = "installer\Output\RoadRashMusicPlayer-Setup-$env:VERSION.exe"
+          $zip = "installer\Output\RoadRashMusicPlayer-$env:VERSION.zip"
+          $sums = "installer\Output\SHA256SUMS.txt"
+          $lines = (Get-Content $sums) -join "`n"
+          $notes = @"
+          Road Rash Music Player $env:VERSION: an in-game music player for Road Rash 95 (Steam), shipped as a proxy dsound.dll.
+
+          - RoadRashMusicPlayer-Setup-$env:VERSION.exe finds your Steam copy of the game and installs dsound.dll, rr95music.ini (only when missing) and the music folder.
+          - RoadRashMusicPlayer-$env:VERSION.zip is the manual install: copy dsound.dll next to RoadRash95.exe.
+
+          The general mod Road Rash FFNNO Patch is optional; to run both together it must be v0.1.4 or later.
+
+          Built by GitHub Actions from commit $env:GITHUB_SHA ([build log]($env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID)).
+
+          **SHA-256**
+          ``````
+          $lines
+          ``````
+
+          Verify a download came from this repository's CI:
+          ``````
+          gh attestation verify RoadRashMusicPlayer-Setup-$env:VERSION.exe --repo $env:GITHUB_REPOSITORY
+          ``````
+
+          Some antivirus tools may flag the proxy dsound.dll because it patches the game's code in memory. It does not modify any game file. This is a fan mod, not affiliated with Electronic Arts.
+          "@
+          $notes | Out-File -Encoding utf8 notes.md
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $setup $zip $sums --clobber
+            gh release edit $tag --notes-file notes.md
+          } else {
+            gh release create $tag $setup $zip $sums --title "Road Rash Music Player $env:VERSION" --notes-file notes.md --verify-tag
+          }
+          if ($LASTEXITCODE -ne 0) { throw "gh release failed ($LASTEXITCODE)" }
