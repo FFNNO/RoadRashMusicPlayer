@@ -23,6 +23,7 @@ First public test release.
 - Inno Setup installer: finds the game folder, keeps the player's `rr95music.ini`, backs up and
   restores another mod's `dsound.dll`, and keeps the `music` folder, `rr95music.ini` and
   `rr95music.log` on uninstall.
+- `dsound.dll` carries a version resource (product name `Road Rash Music Player`).
 - `tools/check_hook_sites.py`, which checks every hook site against your own game executables and
   reports skipped without them.
 
@@ -32,4 +33,16 @@ First public test release.
   as `tools/check_hook_sites.py`, and skips entries the loader already bound.
 - The item text provider registered with the early Reproductor row is cleared when the general mod
   reports a menu it will not draw with its item-text detour (`NOT_USED`, `FAILED`, or `APPLIED`
-  without the detour), before the in-place fallback takes over.
+  without the detour), before the in-place fallback takes over. The clear uses the same menu state
+  as the binding decision; a refused clear keeps the provider registered, is retried at the next
+  binding decision and is logged once.
+- The setup tells its own `dsound.dll` from another mod's file by the version resource only. Any
+  other `dsound.dll` is always backed up, also on a reinstall, as `dsound.dll.bak-before-musicplayer`
+  or, when a backup of that name already exists, as that name plus the date and time, so no backup is
+  ever overwritten. Uninstall restores only the backup that install made (recorded in
+  `dsound.dll.musicplayer-backup`) and leaves any older backup in place.
+- The release workflow builds and tests with read-only access; a separate tag-only job attests and
+  publishes the same files, checks every `gh` exit code, and writes the version into the release
+  notes.
+- `tools/check_hook_sites.py` checks the import slot's section with the same section bounds as the
+  address lookup, fails when no section holds it, and scans every `DDRAW.dll` import descriptor.

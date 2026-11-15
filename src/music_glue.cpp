@@ -68,13 +68,14 @@ struct MusicGlueState {
     // S3b: the graphics menu row registered through the API, the Reproductor popup it opens, and the
     // key capture that only the menu input hook makes safe.
     bool menuRowRegistered = false;
-    // S5 fix: the row reached the general mod before it installed its hooks, at the first
+    // earlyRowRegistered: the row reached the general mod before it installed its hooks, at the first
     // DirectDrawCreate. apiRowRegistered is the API row whichever point registered it, so the owner
     // decision can tell it from the in-place fallback row.
     bool apiRowRegistered = false;
     bool earlyRowRegistered = false;
-    // Review fix: the item text provider registered with the API row, until it is cleared again.
-    bool apiItemTextProviderRegistered = false;
+    // The item text provider registered with the API row; it stays registered until the general
+    // mod accepts the clear.
+    MusicItemTextProviderState itemTextProvider;
     MusicMenuRowOwner menuRowOwner = MusicMenuRowOwner::None;
     // The in-place row's own "shipped bytes do not match" line; the API gate has its two flags below.
     bool menuRowWarningLogged = false;
@@ -1544,30 +1545,30 @@ bool TryRegisterMusicMenuRow(const RR95ModApi* api) {
     }
     g_music.menuRowRegistered = true;
     g_music.apiRowRegistered = true;
-    g_music.apiItemTextProviderRegistered = true;
+    g_music.itemTextProvider.registered = true;
     g_music.menuRowFailure = MusicMenuRowFailure::None;
     g_music.menuRowStatus = 0;
     return true;
 }
 
-void MusicGlueApplyDecision(const Decisions& decisions, const RR95ModApi* api) {
+void MusicGlueApplyDecision(const Decisions& decisions, const BindingInputs& inputs, const RR95ModApi* api) {
     if (!MusicProxyEnabled()) {
         return;
     }
-    // Review fix: the API row registration (early at DirectDrawCreate, or here) also registered the
-    // item text provider. When the general mod reports NOT_USED or FAILED, or APPLIED without its
-    // item-text detour, that provider is cleared before the in-place fallback takes the row and the
-    // item text, so no stale provider stays live in the general mod.
-    if (api != nullptr &&
-        ShouldClearMusicItemTextProvider(g_music.apiItemTextProviderRegistered, api->getMenuState(),
-                                         api->isItemTextDetourInstalled() != 0)) {
-        const int32_t status = api->registerItemTextProvider(nullptr, nullptr);
-        g_music.apiItemTextProviderRegistered = false;
-        if (status == RR95_STATUS_OK) {
-            LOG_INFO("Music: the API item text provider is cleared; the mod's own item text takes over");
-        } else {
-            LOG_WARN("Music: the general mod refused to clear the item text provider (status %d)", status);
-        }
+    // The API row registration (early at DirectDrawCreate, or here) also registered the item text
+    // provider. When the general mod reports NOT_USED or FAILED, or APPLIED without its item-text
+    // detour, that provider is cleared before the in-place fallback takes the row and the item text,
+    // so no stale provider stays live in the general mod. The clear reads the same inputs this
+    // decision was computed from; a refused clear keeps the provider registered and is retried at
+    // the next binding decision.
+    const MusicItemTextProviderClearResult providerClear = ClearStaleMusicItemTextProvider(
+        g_music.itemTextProvider, api, inputs.menuState, inputs.itemTextDetourInstalled);
+    if (providerClear.log && providerClear.outcome == MusicItemTextProviderClear::Cleared) {
+        LOG_INFO("Music: the API item text provider is cleared; the mod's own item text takes over");
+    } else if (providerClear.log && providerClear.outcome == MusicItemTextProviderClear::Refused) {
+        LOG_WARN("Music: the general mod refused to clear the item text provider (status %d); the clear is "
+                 "retried at the next binding decision",
+                 providerClear.status);
     }
     // S4: the fallback sites, the in-place menu row and the GDI blend exist before the rest of the
     // plan runs, so the overlay and the row blocks below can report what actually happened.
@@ -1601,9 +1602,9 @@ void MusicGlueApplyDecision(const Decisions& decisions, const RR95ModApi* api) {
     // an unknown state is not a failure; the gate retries at the next binding decision and only the
     // final states stop the row for the session (S4 adds the in-place row for those).
     //
-    // S5 fix: an early registration already happened at DirectDrawCreate, so menuRowRegistered is
-    // true and this block never registers a second row. After NOT_USED or FAILED the early API row is
-    // dead and the in-place fallback row installed above is the live one.
+    // An early registration at DirectDrawCreate already set menuRowRegistered, so this block never
+    // registers a second row. After NOT_USED or FAILED the early API row is dead and the in-place
+    // fallback row installed above is the live one.
     if (!g_music.menuRowRegistered && decisions.graphicsMenuRow == Binding::UseApi &&
         decisions.itemText == Binding::UseApi && api != nullptr) {
         const MusicMenuRowPlan plan = PlanMusicMenuRow(api->getMenuState());
@@ -1641,7 +1642,7 @@ void MusicGlueApplyDecision(const Decisions& decisions, const RR95ModApi* api) {
             }
         }
     }
-    // S5 fix: say once which row draws the menu. When the general mod does not relocate it, a row
+    // Say once which row draws the menu. When the general mod does not relocate it, a row
     // registered early is never used and only the in-place fallback row can appear.
     const int32_t menuState = api != nullptr ? api->getMenuState() : RR95_MENU_STATE_NOT_USED;
     const MusicMenuRowOwner owner =

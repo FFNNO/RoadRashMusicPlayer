@@ -4,17 +4,24 @@
 ; Silent install example:
 ;   RoadRashMusicPlayer-Setup-0.1.0.exe /VERYSILENT /CURRENTUSER /DIR="C:\...\RoadRash"
 ; It installs dsound.dll, adds rr95music.ini only when the game folder has none, and creates the
-; music folder. A dsound.dll from another mod is kept as dsound.dll.bak-before-musicplayer and
-; restored on uninstall. Uninstall never removes rr95music.ini, rr95music.log or the music folder.
+; music folder. A dsound.dll that is not ours (its version resource does not name this product) is
+; always kept as dsound.dll.bak-before-musicplayer, or under that name plus the date and time when a
+; backup of that name already exists, so no backup is ever replaced. The name of the backup this
+; install made is recorded in dsound.dll.musicplayer-backup, and uninstall restores only that one.
+; Uninstall never removes rr95music.ini, rr95music.log or the music folder.
 
 #ifndef AppVersion
   #define AppVersion "0.1.0"
 #endif
 #define AppName "Road Rash Music Player"
 #define AppURL "https://github.com/FFNNO/RoadRashMusicPlayer"
+; The AppId GUID, written only here. installer/tests/test_installer.py reads it from this line.
+#define AppGuid "E415CF3D-3D49-4060-9D06-DEB4DC3A45E1"
+; "{{" is Inno Setup's escaped "{": the AppId is the GUID in braces.
+#define AppId "{{" + AppGuid + "}"
 
 [Setup]
-AppId={{E415CF3D-3D49-4060-9D06-DEB4DC3A45E1}
+AppId={#AppId}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppVerName={#AppName} {#AppVersion}
@@ -56,8 +63,8 @@ english.NoGameExe=RoadRash95.exe was not found in:%n%n%1%n%nChoose the Road Rash
 spanish.NoGameExe=No se encontró RoadRash95.exe en:%n%n%1%n%nElige la carpeta del juego Road Rash 95 (la que contiene RoadRash95.exe).
 english.NotWritable=Setup cannot write to:%n%n%1%n%nRun the installer as administrator (right-click > Run as administrator) or choose another folder.
 spanish.NotWritable=El instalador no puede escribir en:%n%n%1%n%nEjecuta el instalador como administrador (clic derecho > Ejecutar como administrador) o elige otra carpeta.
-english.ForeignDsound=The game folder already has a dsound.dll from another mod:%n%n%1%n%nOnly one dsound.dll can be active. Setup keeps the existing file as dsound.dll.bak-before-musicplayer and restores it when you uninstall Road Rash Music Player.%n%nContinue?
-spanish.ForeignDsound=La carpeta del juego ya tiene un dsound.dll de otro mod:%n%n%1%n%nSolo puede haber un dsound.dll activo. El instalador guarda el archivo existente como dsound.dll.bak-before-musicplayer y lo restaura al desinstalar Road Rash Music Player.%n%n¿Continuar?
+english.ForeignDsound=The game folder already has a dsound.dll from another mod:%n%n%1%n%nOnly one dsound.dll can be active. Setup keeps the existing file as %2 and restores it when you uninstall Road Rash Music Player.%n%nContinue?
+spanish.ForeignDsound=La carpeta del juego ya tiene un dsound.dll de otro mod:%n%n%1%n%nSolo puede haber un dsound.dll activo. El instalador guarda el archivo existente como %2 y lo restaura al desinstalar Road Rash Music Player.%n%n¿Continuar?
 english.ForeignDsoundCancelled=Setup was cancelled. The existing dsound.dll was not changed.
 spanish.ForeignDsoundCancelled=Se canceló la instalación. El dsound.dll existente no se modificó.
 english.BackupFailed=Could not back up %1. Close the game and try again.
@@ -83,7 +90,11 @@ const
   GameExe = 'RoadRash95.exe';
   DsoundName = 'dsound.dll';
   BackupSuffix = '.bak-before-musicplayer';
-  UninstallKey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{E415CF3D-3D49-4060-9D06-DEB4DC3A45E1}_is1';
+  { The file name of the backup this install made, kept next to it in the game folder. Uninstall
+    restores only that backup, so a stale backup or another program's file is never touched. }
+  BackupStateName = 'dsound.dll.musicplayer-backup';
+  { Our dsound.dll names this product in its version resource (src/dsound.rc). }
+  OurProductName = 'Road Rash Music Player';
 
 { ---------- helpers ---------- }
 
@@ -188,22 +199,50 @@ end;
 
 { ---------- existing dsound.dll ---------- }
 
-{ True when this AppId is already installed in Dir: the dsound.dll there is ours. }
-function InstalledHereBefore(Dir: String): Boolean;
+{ ASCII text as the UTF-16LE bytes a version resource stores. }
+function AsciiToUtf16(S: String): AnsiString;
 var
-  S: String;
+  I: Integer;
 begin
-  Result := False;
-  if not RegQueryStringValue(HKCU, UninstallKey, 'Inno Setup: App Path', S) then
-    if not RegQueryStringValue(HKLM32, UninstallKey, 'Inno Setup: App Path', S) then
-      if not (IsWin64 and RegQueryStringValue(HKLM64, UninstallKey, 'Inno Setup: App Path', S)) then
-        Exit;
-  Result := CompareText(NormalizeDir(S), NormalizeDir(Dir)) = 0;
+  Result := '';
+  for I := 1 to Length(S) do
+    Result := Result + S[I] + #0;
+end;
+
+{ True only when the file's version resource names this product, whoever put the file there. The
+  ProductName entry stores the UTF-16 key, its terminator and the 32-bit alignment padding (four
+  zero bytes together), then the value and its terminator. }
+function IsOurDsound(FileName: String): Boolean;
+var
+  Data: AnsiString;
+begin
+  Result := LoadStringFromFile(FileName, Data) and
+    (Pos(AsciiToUtf16('ProductName') + #0#0#0#0 + AsciiToUtf16(OurProductName) + #0#0, Data) > 0);
+end;
+
+{ A backup file name no file in App uses yet: dsound.dll.bak-before-musicplayer, else that name
+  plus the date and time, else plus a counter as well. An existing backup is never replaced. }
+function UniqueBackupName(App: String): String;
+var
+  Stamped: String;
+  N: Integer;
+begin
+  Result := DsoundName + BackupSuffix;
+  if not FileExists(AddBackslash(App) + Result) then
+    Exit;
+  Stamped := Result + '-' + GetDateTimeString('yyyymmdd-hhnnss', '-', ':');
+  Result := Stamped;
+  N := 2;
+  while FileExists(AddBackslash(App) + Result) do
+  begin
+    Result := Stamped + '-' + IntToStr(N);
+    N := N + 1;
+  end;
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
-  App, Dll, Backup: String;
+  App, Dll, BackupName: String;
 begin
   Result := '';
   App := NormalizeDir(WizardDirValue);
@@ -219,23 +258,29 @@ begin
   end;
 
   Dll := AddBackslash(App) + DsoundName;
-  Backup := Dll + BackupSuffix;
-  { A dsound.dll that is not ours: warn, then keep it aside. An existing backup is never replaced. }
-  if FileExists(Dll) and not InstalledHereBefore(App) and not FileExists(Backup) then
+  { Decided by content only, never by the uninstall entry or an existing backup: a dsound.dll whose
+    version resource does not name this product is another program's file and is always kept. }
+  if FileExists(Dll) and not IsOurDsound(Dll) then
   begin
     Log('A dsound.dll from another mod is present: ' + Dll);
-    if SuppressibleMsgBox(FmtMessage(CustomMessage('ForeignDsound'), [Dll]), mbConfirmation,
+    BackupName := UniqueBackupName(App);
+    if SuppressibleMsgBox(FmtMessage(CustomMessage('ForeignDsound'), [Dll, BackupName]), mbConfirmation,
       MB_OKCANCEL, IDOK) <> IDOK then
     begin
       Result := CustomMessage('ForeignDsoundCancelled');
       Exit;
     end;
-    if not FileCopy(Dll, Backup, True) then
+    if not FileCopy(Dll, AddBackslash(App) + BackupName, True) then
     begin
       Result := FmtMessage(CustomMessage('BackupFailed'), [DsoundName]);
       Exit;
     end;
-    Log(Format('Backup %s -> %s', [Dll, Backup]));
+    if not SaveStringToFile(AddBackslash(App) + BackupStateName, BackupName, False) then
+    begin
+      Result := FmtMessage(CustomMessage('BackupFailed'), [DsoundName]);
+      Exit;
+    end;
+    Log(Format('Backup %s -> %s', [Dll, BackupName]));
   end;
 end;
 
@@ -262,16 +307,35 @@ end;
 
 { ---------- uninstall ---------- }
 
-{ The uninstaller has removed our dsound.dll; put the other mod's file back. }
+{ True for a backup name this installer writes: a plain file name, never a path. }
+function IsBackupName(Name: String): Boolean;
+begin
+  Result := (Pos(Lowercase(DsoundName + BackupSuffix), Lowercase(Name)) = 1) and
+    (Pos('\', Name) = 0) and (Pos('/', Name) = 0) and (Pos(':', Name) = 0) and (Pos('..', Name) = 0);
+end;
+
+{ The uninstaller has removed our dsound.dll; put back the file the recorded backup holds. Only the
+  backup this install made is restored; any other backup stays where it is. }
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
-  Dll, Backup: String;
+  App, Dll, State, Name: String;
+  Recorded: AnsiString;
 begin
-  if CurUninstallStep = usPostUninstall then
-  begin
-    Dll := ExpandConstant('{app}\') + DsoundName;
-    Backup := Dll + BackupSuffix;
-    if FileExists(Backup) and not FileExists(Dll) then
-      Log(Format('Restore %s: %d', [Dll, Ord(RenameFile(Backup, Dll))]));
-  end;
+  if CurUninstallStep <> usPostUninstall then
+    Exit;
+  App := ExpandConstant('{app}');
+  Dll := AddBackslash(App) + DsoundName;
+  State := AddBackslash(App) + BackupStateName;
+  if not LoadStringFromFile(State, Recorded) then
+    Exit;
+  Name := Trim(String(Recorded));
+  if not IsBackupName(Name) then
+    Log('Ignoring an unexpected backup record: ' + Name)
+  else if not FileExists(AddBackslash(App) + Name) then
+    Log('The recorded backup is gone: ' + Name)
+  else if FileExists(Dll) then
+    Log(Format('%s exists; the backup %s is kept', [Dll, Name]))
+  else
+    Log(Format('Restore %s from %s: %d', [Dll, Name, Ord(RenameFile(AddBackslash(App) + Name, Dll))]));
+  DeleteFile(State);
 end;

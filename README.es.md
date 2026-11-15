@@ -42,7 +42,7 @@ Es un `dsound.dll` proxy: se ubica junto a `RoadRash95.exe`, reenvía cada llama
 2. Cerrar el juego y ejecutar el instalador. Encuentra la carpeta del juego a partir del registro o de las bibliotecas de Steam, y solo continúa si `RoadRash95.exe` está en la carpeta elegida. Si no puede escribir allí, debe ejecutarse como administrador.
 3. Instala `dsound.dll`, agrega `rr95music.ini` solo si la carpeta no tiene uno (la configuración existente nunca se sobrescribe) y crea la carpeta `music`.
 
-Si la carpeta del juego ya tiene un `dsound.dll` de otro mod, el instalador lo advierte, guarda ese archivo como `dsound.dll.bak-before-musicplayer` y lo restaura al desinstalar.
+Si la carpeta del juego ya tiene un `dsound.dll` de otro mod, el instalador lo advierte, guarda ese archivo como `dsound.dll.bak-before-musicplayer` (o con ese nombre más la fecha y la hora, si ya existe una copia con ese nombre) y lo restaura al desinstalar. Nunca se sobrescribe una copia de seguridad.
 
 Instalación silenciosa: `RoadRashMusicPlayer-Setup-0.1.0.exe /VERYSILENT /CURRENTUSER /DIR="<carpeta del juego>"`.
 
@@ -168,7 +168,7 @@ En ambos casos se conservan la carpeta `music`, `rr95music.ini`, `rr95music.log`
 
 - **No ocurre nada en el juego:** abrir `rr95music.log` en la carpeta del juego. Indica si el reproductor se cargó, si encontró el mod general, qué hooks instaló y qué casetes leyó. Una línea sobre una versión desconocida del ejecutable significa que el ejecutable del juego cambió: en ese caso el reproductor solo reenvía las llamadas de DirectSound. Con `LogLevel=debug` se obtiene más detalle.
 - **No suena la música de la carpeta:** revisar `Path` y los formatos de archivo. Cada subcarpeta de primer nivel de `music\` es un casete; los archivos de carpetas más profundas pertenecen a su casete de primer nivel, y un casete sin archivos admitidos se omite.
-- **Otro mod también usa `dsound.dll`:** solo puede haber un archivo con ese nombre en la carpeta del juego, así que solo uno de los dos mods puede estar activo. El instalador guarda el otro archivo como `dsound.dll.bak-before-musicplayer`; al desinstalar el reproductor se recupera, o pueden intercambiarse los archivos a mano.
+- **Otro mod también usa `dsound.dll`:** solo puede haber un archivo con ese nombre en la carpeta del juego, así que solo uno de los dos mods puede estar activo. El instalador guarda el otro archivo como `dsound.dll.bak-before-musicplayer` (más la fecha y la hora si ese nombre ya está en uso); al desinstalar el reproductor se recupera, o pueden intercambiarse los archivos a mano.
 - **Una tecla rápida no funciona:** puede coincidir con la `ToggleKey` del mod general o con `F11`, lo que la desactiva; el registro lo indica. Conviene elegir otra tecla.
 - **Advertencia del antivirus:** algunos antivirus pueden marcar una DLL proxy porque modifica el código del juego en memoria. No modifica ningún archivo del juego.
 

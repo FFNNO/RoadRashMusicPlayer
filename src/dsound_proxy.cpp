@@ -220,7 +220,7 @@ void RunDecision(BindingTrigger trigger, const void* caller) {
              query.itemTextDetourInstalled ? 1 : 0);
     LogDecision(decisions);
 
-    MusicGlueApplyDecision(decisions, query.api);
+    MusicGlueApplyDecision(decisions, inputs, query.api);
 
     const bool pending = HasPendingDecision(decisions);
     g_schedule = AfterBindingDecision(g_schedule, pending);
@@ -230,7 +230,7 @@ void RunDecision(BindingTrigger trigger, const void* caller) {
     }
 }
 
-// S5 fix: chained IAT hook on the exe's DDRAW.dll!DirectDrawCreate import.
+// Chained IAT hook on the exe's DDRAW.dll!DirectDrawCreate import.
 //
 // The general mod installs its hooks and opens its menu row slot inside its own DirectDrawCreate,
 // which the game calls from WinMain about 11 s before the first DirectSoundCreate. A row added from

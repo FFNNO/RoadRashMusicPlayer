@@ -21,9 +21,10 @@ slot, and src/dsound_proxy.cpp with src/early_hook.{h,cpp} must keep the import 
 the call into the original function, the conditional slot restore and the loader-lock safe [Music]
 Enabled guard, with no module load, no export lookup and no log call in the code DllMain runs.
 
-The import lookup here and FindImportSlot in src/early_hook.cpp follow one rule: the name table is
-OriginalFirstThunk, or FirstThunk when OriginalFirstThunk is 0; ordinal entries are skipped, and so is
-an entry that is not an RVA inside the image (an entry the loader already bound to an address).
+The import lookup here and FindImportSlot in src/early_hook.cpp follow one rule: every descriptor with
+the DLL name is scanned in order and the first match wins; the name table is OriginalFirstThunk, or
+FirstThunk when OriginalFirstThunk is 0; ordinal entries are skipped, and so is an entry that is not an
+RVA inside the image (an entry the loader already bound to an address).
 
 The general mod (Road Rash FFNNO Patch) owns its hook-site table, renderer/src/hook_sites.cpp in its
 own repository. GENERAL_SITES below is a snapshot of that table, verified against both exes too.
@@ -137,7 +138,11 @@ def read_c_string(pe, offset):
     return pe[offset:end if end >= 0 else len(pe)]
 
 
-def va_to_offset(pe, va):
+def find_section(pe, va):
+    """(section header offset, offset of VA inside the section) of the section that holds VA.
+
+    A section spans max(VirtualSize, SizeOfRawData) from its VirtualAddress. Raises ValueError when no
+    section holds VA, so a caller never reads an answer for an address outside the image."""
     lfanew = struct.unpack_from("<I", pe, 0x3C)[0]
     nsec = struct.unpack_from("<H", pe, lfanew + 6)[0]
     opt_size = struct.unpack_from("<H", pe, lfanew + 20)[0]
@@ -146,61 +151,62 @@ def va_to_offset(pe, va):
     sec = lfanew + 24 + opt_size
     for i in range(nsec):
         s = sec + 40 * i
-        vsize, vaddr, rsize, raw = struct.unpack_from("<IIII", pe, s + 8)
+        vsize, vaddr, rsize = struct.unpack_from("<III", pe, s + 8)
         if vaddr <= rva < vaddr + max(vsize, rsize):
-            return raw + (rva - vaddr)
+            return s, rva - vaddr
     raise ValueError(f"VA 0x{va:08X} is not inside any section")
 
 
+def va_to_offset(pe, va):
+    s, delta = find_section(pe, va)
+    return struct.unpack_from("<I", pe, s + 20)[0] + delta  # PointerToRawData
+
+
 def section_characteristics(pe, va):
-    lfanew = struct.unpack_from("<I", pe, 0x3C)[0]
-    nsec = struct.unpack_from("<H", pe, lfanew + 6)[0]
-    opt_size = struct.unpack_from("<H", pe, lfanew + 20)[0]
-    image_base = struct.unpack_from("<I", pe, lfanew + 24 + 28)[0]
-    sec = lfanew + 24 + opt_size
-    for i in range(nsec):
-        s = sec + 40 * i
-        vsize, vaddr = struct.unpack_from("<II", pe, s + 8)
-        if vaddr <= va - image_base < vaddr + vsize:
-            return struct.unpack_from("<I", pe, s + 36)[0]
-    return 0
+    s, _delta = find_section(pe, va)
+    return struct.unpack_from("<I", pe, s + 36)[0]
 
 
 def import_slots(pe, dll_name):
     """Function name -> IAT slot VA of one imported DLL, with the rule FindImportSlot uses.
 
-    Returns (slots, table) where table says which array served as the name table."""
+    Like FindImportSlot, every descriptor with that DLL name is scanned, in order, and the first slot
+    found for a name wins. Returns (slots, tables) where tables maps each name to the array that
+    served as its name table."""
     lfanew = struct.unpack_from("<I", pe, 0x3C)[0]
     image_base = struct.unpack_from("<I", pe, lfanew + 24 + 28)[0]
     image_size = struct.unpack_from("<I", pe, lfanew + 24 + 56)[0]
     rva, size = struct.unpack_from("<II", pe, lfanew + 24 + 96 + 8)
     out = {}
+    tables = {}
     if rva == 0 or size == 0:
-        return out, None
+        return out, tables
     p = va_to_offset(pe, image_base + rva)
     while True:
         original, _ts, _fwd, name_rva, first = struct.unpack_from("<IIIII", pe, p)
+        p += 20
         if name_rva == 0:
             break
         module = read_c_string(pe, va_to_offset(pe, image_base + name_rva))
-        if module.decode("ascii", "replace").lower() == dll_name:
-            table = original if original else first
-            if table == 0 or first == 0:
-                p += 20
-                continue
-            q = va_to_offset(pe, image_base + table)
-            i = 0
-            while True:
-                value = struct.unpack_from("<I", pe, q + 4 * i)[0]
-                if value == 0:
-                    break
-                if not value >> 31 and value < image_size:
-                    name = read_c_string(pe, va_to_offset(pe, image_base + value + 2))
-                    out[name.decode("ascii", "replace")] = image_base + first + 4 * i
-                i += 1
-            return out, ("OriginalFirstThunk" if original else "FirstThunk")
-        p += 20
-    return out, None
+        if module.decode("ascii", "replace").lower() != dll_name:
+            continue
+        table = original if original else first
+        if table == 0 or first == 0:
+            continue
+        label = "OriginalFirstThunk" if original else "FirstThunk"
+        q = va_to_offset(pe, image_base + table)
+        i = 0
+        while True:
+            value = struct.unpack_from("<I", pe, q + 4 * i)[0]
+            if value == 0:
+                break
+            if not value >> 31 and value < image_size:
+                name = read_c_string(pe, va_to_offset(pe, image_base + value + 2)).decode("ascii", "replace")
+                if name not in out:
+                    out[name] = image_base + first + 4 * i
+                    tables[name] = label
+            i += 1
+    return out, tables
 
 
 def function_body(text, start_marker):
@@ -233,14 +239,19 @@ def check_early_hook_source(texts):
 
 def check_early_hook_exe(label, pe):
     failures = 0
-    slots, table = import_slots(pe, EARLY_HOOK_IMPORT_DLL)
+    slots, tables = import_slots(pe, EARLY_HOOK_IMPORT_DLL)
     va = slots.get(EARLY_HOOK_IMPORT_FUNCTION)
     ok = va is not None
     failures += not ok
-    where = f" at VA 0x{va:08X} (name table: {table})" if ok else f" (imports {sorted(slots)[:6]})"
+    where = (f" at VA 0x{va:08X} (name table: {tables[EARLY_HOOK_IMPORT_FUNCTION]})" if ok
+             else f" (imports {sorted(slots)[:6]})")
     print(f"{'OK  ' if ok else 'FAIL'} {label} imports DDRAW.dll!DirectDrawCreate by name{where}")
     if ok:
-        writable = bool(section_characteristics(pe, va) & IMAGE_SCN_MEM_WRITE)
+        try:
+            writable = bool(section_characteristics(pe, va) & IMAGE_SCN_MEM_WRITE)
+        except ValueError as error:
+            print(f"FAIL {label} the DirectDrawCreate IAT slot has no section: {error}")
+            return failures + 1
         failures += writable
         print(f"{'OK  ' if not writable else 'FAIL'} {label} the DirectDrawCreate IAT slot 0x{va:08X} is in a "
               f"read-only section, so the hook needs VirtualProtect")

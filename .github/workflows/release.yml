@@ -1,7 +1,8 @@
 # Builds dsound.dll and the Inno Setup installer on a clean GitHub runner.
 # - Every push to main and every pull request: build + unit tests + hook-site check, the setup and
 #   the zip kept as a workflow artifact.
-# - Every tag v*: same build, then a GitHub Release with the setup, a zip of dsound.dll,
+# - Every tag v*: same build, then a separate release job (the only one with write access)
+#   downloads that artifact and publishes a GitHub Release with the setup, a zip of dsound.dll,
 #   rr95music.ini, both READMEs and LICENSE, their SHA-256 and a build provenance attestation, so
 #   anyone can check the published files came from this commit.
 #   Verify a download with: gh attestation verify <file> --repo FFNNO/RoadRashMusicPlayer
@@ -25,9 +26,9 @@ jobs:
   build:
     runs-on: windows-2025
     permissions:
-      contents: write      # create the release (tags only)
-      id-token: write      # sign the provenance attestation
-      attestations: write
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.value }}
     env:
       ISCC: C:\Program Files (x86)\Inno Setup 6\ISCC.exe
     steps:
@@ -100,36 +101,54 @@ jobs:
             build/Release/dsound.dll
           if-no-files-found: error
 
+  release:
+    # Tags only. The build job never holds write access; this job builds nothing and runs no
+    # repository code: it attests and publishes the files the build job uploaded.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write      # create or update the release
+      id-token: write      # sign the provenance attestation
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: RoadRashMusicPlayer-${{ needs.build.outputs.version }}
+          path: dist
+
       - name: Attest build provenance
-        if: github.ref_type == 'tag'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
-            installer/Output/RoadRashMusicPlayer-Setup-${{ steps.version.outputs.value }}.exe
-            installer/Output/RoadRashMusicPlayer-${{ steps.version.outputs.value }}.zip
-            build/Release/dsound.dll
+            dist/installer/Output/RoadRashMusicPlayer-Setup-${{ needs.build.outputs.version }}.exe
+            dist/installer/Output/RoadRashMusicPlayer-${{ needs.build.outputs.version }}.zip
+            dist/build/Release/dsound.dll
 
       - name: Publish GitHub Release
-        if: github.ref_type == 'tag'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.version.outputs.value }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.build.outputs.version }}
         run: |
           $tag = $env:GITHUB_REF_NAME
-          $setup = "installer\Output\RoadRashMusicPlayer-Setup-$env:VERSION.exe"
-          $zip = "installer\Output\RoadRashMusicPlayer-$env:VERSION.zip"
-          $sums = "installer\Output\SHA256SUMS.txt"
+          $setup = "dist/installer/Output/RoadRashMusicPlayer-Setup-${env:VERSION}.exe"
+          $zip = "dist/installer/Output/RoadRashMusicPlayer-${env:VERSION}.zip"
+          $sums = "dist/installer/Output/SHA256SUMS.txt"
+          foreach ($file in @($setup, $zip, $sums)) {
+            if (-not (Test-Path -LiteralPath $file)) { throw "Missing release file: $file" }
+          }
           $lines = (Get-Content $sums) -join "`n"
           $notes = @"
-          Road Rash Music Player $env:VERSION: an in-game music player for Road Rash 95 (Steam), shipped as a proxy dsound.dll.
+          Road Rash Music Player ${env:VERSION}: an in-game music player for Road Rash 95 (Steam), shipped as a proxy dsound.dll.
 
-          - RoadRashMusicPlayer-Setup-$env:VERSION.exe finds your Steam copy of the game and installs dsound.dll, rr95music.ini (only when missing) and the music folder.
-          - RoadRashMusicPlayer-$env:VERSION.zip is the manual install: copy dsound.dll next to RoadRash95.exe.
+          - RoadRashMusicPlayer-Setup-${env:VERSION}.exe finds your Steam copy of the game and installs dsound.dll, rr95music.ini (only when missing) and the music folder.
+          - RoadRashMusicPlayer-${env:VERSION}.zip is the manual install: copy dsound.dll next to RoadRash95.exe.
 
           The general mod Road Rash FFNNO Patch is optional; to run both together it must be v0.1.4 or later.
 
-          Built by GitHub Actions from commit $env:GITHUB_SHA ([build log]($env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID)).
+          Built by GitHub Actions from commit ${env:GITHUB_SHA} ([build log](${env:GITHUB_SERVER_URL}/${env:GITHUB_REPOSITORY}/actions/runs/${env:GITHUB_RUN_ID})).
 
           **SHA-256**
           ``````
@@ -138,7 +157,7 @@ jobs:
 
           Verify a download came from this repository's CI:
           ``````
-          gh attestation verify RoadRashMusicPlayer-Setup-$env:VERSION.exe --repo $env:GITHUB_REPOSITORY
+          gh attestation verify RoadRashMusicPlayer-Setup-${env:VERSION}.exe --repo ${env:GITHUB_REPOSITORY}
           ``````
 
           Some antivirus tools may flag the proxy dsound.dll because it patches the game's code in memory. It does not modify any game file. This is a fan mod, not affiliated with Electronic Arts.
@@ -147,8 +166,10 @@ jobs:
           gh release view $tag *> $null
           if ($LASTEXITCODE -eq 0) {
             gh release upload $tag $setup $zip $sums --clobber
+            if ($LASTEXITCODE -ne 0) { throw "gh release upload failed ($LASTEXITCODE)" }
             gh release edit $tag --notes-file notes.md
+            if ($LASTEXITCODE -ne 0) { throw "gh release edit failed ($LASTEXITCODE)" }
           } else {
-            gh release create $tag $setup $zip $sums --title "Road Rash Music Player $env:VERSION" --notes-file notes.md --verify-tag
+            gh release create $tag $setup $zip $sums --title "Road Rash Music Player ${env:VERSION}" --notes-file notes.md --verify-tag
+            if ($LASTEXITCODE -ne 0) { throw "gh release create failed ($LASTEXITCODE)" }
           }
-          if ($LASTEXITCODE -ne 0) { throw "gh release failed ($LASTEXITCODE)" }

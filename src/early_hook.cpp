@@ -49,7 +49,7 @@ void** FindImportSlot(const void* moduleBase, const char* dllName, const char* f
         if (!AsciiEqualsIgnoreCase(reinterpret_cast<const char*>(base + descriptor->Name), dllName)) {
             continue;
         }
-        // Review fix: the same name table rule as tools/check_hook_sites.py. Without an
+        // The same name table rule as tools/check_hook_sites.py. Without an
         // OriginalFirstThunk the FirstThunk array is the only name table; once the loader has bound
         // an entry it holds an address instead of a name RVA, and the bounds check below skips it.
         const uint32_t nameTable =

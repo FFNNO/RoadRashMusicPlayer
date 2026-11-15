@@ -693,6 +693,27 @@ bool ShouldClearMusicItemTextProvider(bool providerRegistered, int32_t menuState
     }
 }
 
+MusicItemTextProviderClearResult ClearStaleMusicItemTextProvider(MusicItemTextProviderState& state,
+                                                                 const RR95ModApi* api, int32_t menuState,
+                                                                 bool itemTextDetourInstalled) {
+    MusicItemTextProviderClearResult result;
+    if (api == nullptr || api->registerItemTextProvider == nullptr ||
+        !ShouldClearMusicItemTextProvider(state.registered, menuState, itemTextDetourInstalled)) {
+        return result;
+    }
+    result.status = api->registerItemTextProvider(nullptr, nullptr);
+    if (result.status == RR95_STATUS_OK) {
+        state.registered = false;
+        result.outcome = MusicItemTextProviderClear::Cleared;
+        result.log = true;
+    } else {
+        result.outcome = MusicItemTextProviderClear::Refused;
+        result.log = !state.refusalLogged;
+        state.refusalLogged = true;
+    }
+    return result;
+}
+
 MusicMenuInPlacePlan PlanMusicMenuInPlace(bool ownRow, bool ownItemText, bool shippedMatches,
                                          bool installed) {
     MusicMenuInPlacePlan plan;

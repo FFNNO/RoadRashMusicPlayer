@@ -42,7 +42,7 @@ It is a proxy `dsound.dll`: it sits next to `RoadRash95.exe`, forwards every Dir
 2. Close the game and run the setup. It finds the game folder from the registry or your Steam libraries, and it only continues when `RoadRash95.exe` is in the chosen folder. If it cannot write there, run it as administrator.
 3. It installs `dsound.dll`, adds `rr95music.ini` only when the folder has none (your settings are never overwritten), and creates the `music` folder.
 
-If the game folder already has a `dsound.dll` from another mod, the setup warns you, keeps that file as `dsound.dll.bak-before-musicplayer`, and puts it back when you uninstall.
+If the game folder already has a `dsound.dll` from another mod, the setup warns you, keeps that file as `dsound.dll.bak-before-musicplayer` (or that name plus the date and time, when a backup of that name already exists), and puts it back when you uninstall. No backup is ever overwritten.
 
 Silent install: `RoadRashMusicPlayer-Setup-0.1.0.exe /VERYSILENT /CURRENTUSER /DIR="<game folder>"`.
 
@@ -170,7 +170,7 @@ Your `music` folder, `rr95music.ini`, `rr95music.log` and the registry values ar
 
 - **Nothing happens in game:** open `rr95music.log` in the game folder. It says whether the player loaded, whether it found the general mod, which hooks it installed and which cassettes it read. A line about an unknown exe build means the game executable changed: the player then only forwards DirectSound calls. Set `LogLevel=debug` for more detail.
 - **No music from my folder:** check `Path` and the file formats. Each first-level subfolder of `music\` is one cassette; files in deeper folders belong to their first-level cassette, and a cassette without supported files is skipped.
-- **Another mod also uses `dsound.dll`:** only one file of that name can be in the game folder, so only one of the two mods can be active. The setup keeps the other file as `dsound.dll.bak-before-musicplayer`; uninstall the player to get it back, or swap the files by hand.
+- **Another mod also uses `dsound.dll`:** only one file of that name can be in the game folder, so only one of the two mods can be active. The setup keeps the other file as `dsound.dll.bak-before-musicplayer` (plus the date and time when that name is taken); uninstall the player to get it back, or swap the files by hand.
 - **A hotkey does nothing:** it may equal the general mod's `ToggleKey` or `F11`, which disables it; the log says so. Pick another key.
 - **Antivirus warning:** some antivirus tools may flag a proxy DLL because it patches the game's code in memory. It does not modify any game file.
 

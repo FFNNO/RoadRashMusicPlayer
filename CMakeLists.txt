@@ -53,6 +53,8 @@ add_library(dsound SHARED
   src/shared/exe_identity.cpp
   src/shared/hook.cpp
   src/dsound.def
+  # Version resource: the installer identifies its own dsound.dll by this ProductName.
+  src/dsound.rc
 )
 set_target_properties(dsound PROPERTIES OUTPUT_NAME "dsound" PREFIX "")
 target_compile_options(dsound PRIVATE ${RRMP_COMMON_OPTIONS})

@@ -1,0 +1,32 @@
+// Version resource of the proxy dsound.dll. The installer tells its own dsound.dll from another
+// mod's file by the ProductName below and by nothing else, so keep that value unchanged.
+#include <winver.h>
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 0,1,0,0
+ PRODUCTVERSION 0,1,0,0
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_DLL
+ FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "Road Rash Music Player"
+            VALUE "FileDescription", "Road Rash Music Player (proxy dsound.dll for Road Rash 95)"
+            VALUE "FileVersion", "0.1.0"
+            VALUE "InternalName", "dsound"
+            VALUE "LegalCopyright", "Copyright (c) 2026 FFNNO, MIT License"
+            VALUE "OriginalFilename", "dsound.dll"
+            VALUE "ProductName", "Road Rash Music Player"
+            VALUE "ProductVersion", "0.1.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

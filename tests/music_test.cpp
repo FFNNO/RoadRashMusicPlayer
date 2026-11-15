@@ -784,7 +784,7 @@ void TestBindingRetry() {
           "binding retry: a retry that resolves the Wait stops the retries");
 }
 
-// S5 fix: the Reproductor row is registered at the game's first DirectDrawCreate, before the general
+// The Reproductor row is registered at the game's first DirectDrawCreate, before the general
 // mod installs its hooks and builds the relocated graphics menu. The pure decision says when that is
 // safe, and the DirectSoundCreate binding must not register the row a second time.
 void TestMusicEarlyRow() {
@@ -868,7 +868,7 @@ void TestMusicEarlyRow() {
           "binding S5: no row exists when neither registration happened");
 }
 
-// Review fix: the early IAT path against a synthetic in-memory PE image. The image has a decoy
+// The early IAT path against a synthetic in-memory PE image. The image has a decoy
 // KERNEL32.dll descriptor that also imports a "DirectDrawCreate" name, then DDRAW.dll with an ordinal
 // import, DirectDrawEnumerateA and DirectDrawCreate (index 2).
 constexpr uint32_t kSyntheticImageSize = 0x1000;
@@ -1107,7 +1107,7 @@ void TestEarlyImportHook() {
     VirtualFree(page, 0, MEM_RELEASE);
 }
 
-// Review fix: an item text provider registered with the early row is cleared when the general mod
+// An item text provider registered with the early row is cleared when the general mod
 // will not draw the relocated menu with its item-text detour, before the in-place fallback runs.
 void TestEarlyItemTextProviderClear() {
     Check(ShouldClearMusicItemTextProvider(true, RR95_MENU_STATE_NOT_USED, true),
@@ -1145,7 +1145,116 @@ void TestEarlyItemTextProviderClear() {
     Check(consistent, "early provider: the provider is cleared exactly when the fallback owns the item text");
 }
 
-// S5 fix: the loader-lock safe [Music] Enabled probe used by DllMain before the early IAT hook.
+// A fake general mod API for the provider clear. It counts the clear calls, answers them with a
+// configurable status, and counts every live state read. Its live state says the API row is still
+// drawn (APPLIED with the item-text detour), so a clear that re-read it would never clear anything.
+struct FakeProviderApiState {
+    int clearCalls = 0;
+    int stateReads = 0;
+    int32_t clearStatus = RR95_STATUS_OK;
+};
+FakeProviderApiState g_fakeProviderApi;
+
+RR95ModApi MakeFakeProviderApi() {
+    RR95ModApi api = {};
+    api.version = RR95_MOD_API_VERSION;
+    api.size = static_cast<uint32_t>(sizeof(RR95ModApi));
+    api.registerItemTextProvider = [](const char* (*provider)(const void*, void*), void*) -> int32_t {
+        if (provider != nullptr) {
+            return RR95_STATUS_OK;
+        }
+        ++g_fakeProviderApi.clearCalls;
+        return g_fakeProviderApi.clearStatus;
+    };
+    api.getMenuState = []() -> int32_t {
+        ++g_fakeProviderApi.stateReads;
+        return RR95_MENU_STATE_APPLIED;
+    };
+    api.isItemTextDetourInstalled = []() -> int32_t {
+        ++g_fakeProviderApi.stateReads;
+        return 1;
+    };
+    return api;
+}
+
+// The provider clear runs on the inputs the binding decision was computed from, keeps the provider
+// registered while the general mod refuses the clear, retries it at the next decision pass and logs
+// each outcome once.
+void TestItemTextProviderClearWithFakeApi() {
+    g_fakeProviderApi = FakeProviderApiState{};
+    const RR95ModApi api = MakeFakeProviderApi();
+
+    MusicItemTextProviderState accepted;
+    accepted.registered = true;
+    MusicItemTextProviderClearResult result =
+        ClearStaleMusicItemTextProvider(accepted, &api, RR95_MENU_STATE_NOT_USED, false);
+    Check(result.outcome == MusicItemTextProviderClear::Cleared && result.status == RR95_STATUS_OK &&
+              result.log && !accepted.registered && g_fakeProviderApi.clearCalls == 1,
+          "provider clear: an accepted clear runs once, is logged and drops the provider");
+    result = ClearStaleMusicItemTextProvider(accepted, &api, RR95_MENU_STATE_NOT_USED, false);
+    Check(result.outcome == MusicItemTextProviderClear::Kept && !result.log &&
+              g_fakeProviderApi.clearCalls == 1,
+          "provider clear: a cleared provider is never cleared again");
+
+    g_fakeProviderApi = FakeProviderApiState{};
+    g_fakeProviderApi.clearStatus = RR95_STATUS_REJECTED;
+    MusicItemTextProviderState refused;
+    refused.registered = true;
+    result = ClearStaleMusicItemTextProvider(refused, &api, RR95_MENU_STATE_FAILED, true);
+    Check(result.outcome == MusicItemTextProviderClear::Refused && result.status == RR95_STATUS_REJECTED &&
+              result.log && refused.registered && g_fakeProviderApi.clearCalls == 1,
+          "provider clear: a refused clear keeps the provider registered and logs the refusal");
+    result = ClearStaleMusicItemTextProvider(refused, &api, RR95_MENU_STATE_FAILED, true);
+    Check(result.outcome == MusicItemTextProviderClear::Refused && !result.log && refused.registered &&
+              g_fakeProviderApi.clearCalls == 2,
+          "provider clear: a refused clear is retried at the next decision pass without a second log line");
+    g_fakeProviderApi.clearStatus = RR95_STATUS_OK;
+    result = ClearStaleMusicItemTextProvider(refused, &api, RR95_MENU_STATE_FAILED, true);
+    Check(result.outcome == MusicItemTextProviderClear::Cleared && result.log && !refused.registered &&
+              g_fakeProviderApi.clearCalls == 3,
+          "provider clear: the retry clears the provider once the general mod accepts it, and logs it");
+    result = ClearStaleMusicItemTextProvider(refused, &api, RR95_MENU_STATE_FAILED, true);
+    Check(result.outcome == MusicItemTextProviderClear::Kept && g_fakeProviderApi.clearCalls == 3,
+          "provider clear: nothing is called after the retried clear succeeded");
+
+    g_fakeProviderApi = FakeProviderApiState{};
+    MusicItemTextProviderState live;
+    live.registered = true;
+    result = ClearStaleMusicItemTextProvider(live, &api, RR95_MENU_STATE_APPLIED, true);
+    Check(result.outcome == MusicItemTextProviderClear::Kept && !result.log && live.registered &&
+              g_fakeProviderApi.clearCalls == 0,
+          "provider clear: a live API row keeps its provider without any call");
+    result = ClearStaleMusicItemTextProvider(live, nullptr, RR95_MENU_STATE_NOT_USED, false);
+    Check(result.outcome == MusicItemTextProviderClear::Kept && live.registered,
+          "provider clear: without an API table nothing is called and the flag is unchanged");
+
+    // The flag is false exactly after an accepted clear, and a clear is attempted exactly when the
+    // decision inputs hand the item text to the fallback.
+    const int32_t states[] = {RR95_MENU_STATE_NOT_USED, RR95_MENU_STATE_PENDING, RR95_MENU_STATE_APPLIED,
+                              RR95_MENU_STATE_FAILED, RR95_MENU_STATE_UNKNOWN};
+    bool consistent = true;
+    for (const int32_t state : states) {
+        for (const bool detour : {false, true}) {
+            for (const int32_t status : {RR95_STATUS_OK, RR95_STATUS_REJECTED}) {
+                g_fakeProviderApi = FakeProviderApiState{};
+                g_fakeProviderApi.clearStatus = status;
+                MusicItemTextProviderState provider;
+                provider.registered = true;
+                result = ClearStaleMusicItemTextProvider(provider, &api, state, detour);
+                const bool stale = ShouldClearMusicItemTextProvider(true, state, detour);
+                consistent = consistent && g_fakeProviderApi.clearCalls == (stale ? 1 : 0) &&
+                             (result.outcome == MusicItemTextProviderClear::Cleared) ==
+                                 (stale && status == RR95_STATUS_OK) &&
+                             provider.registered == (result.outcome != MusicItemTextProviderClear::Cleared) &&
+                             g_fakeProviderApi.stateReads == 0;
+            }
+        }
+    }
+    Check(consistent, "provider clear: the flag stays consistent with the clear outcome in every state, and "
+                      "the live API state is never read");
+}
+
+// The loader-lock safe [Music] Enabled probe used by DllMain before the early IAT hook.
 void TestMusicEnabledIniProbe() {
     const auto probe = [](const char* text, bool defaultEnabled) {
         return ParseMusicEnabledIni(text, text != nullptr ? std::strlen(text) : 0, defaultEnabled);
@@ -5154,6 +5263,7 @@ int main() {
     TestMusicEarlyRow();
     TestEarlyImportHook();
     TestEarlyItemTextProviderClear();
+    TestItemTextProviderClearWithFakeApi();
     TestMusicConfig();
     TestMusicEnabledIniProbe();
     TestExportTable();

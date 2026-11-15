@@ -44,7 +44,7 @@ void ParseMusicConfigFile(const std::wstring& iniPath, MusicConfig& cfg);
 void MusicConfigInit(const std::wstring& iniPath);
 const MusicConfig& GetMusicConfig();
 
-// S5 fix: the loader-lock safe probe DllMain uses before it installs the early DirectDrawCreate IAT
+// The loader-lock safe probe DllMain uses before it installs the early DirectDrawCreate IAT
 // hook. It reads only [Music] Enabled, from the bytes of the ini, with plain file APIs: no module is
 // loaded, no log is opened and no API is resolved. Anything missing, unreadable or unparsable keeps
 // defaultEnabled (an installed proxy is the opt-in, so a fresh install stays enabled).

@@ -1,6 +1,6 @@
 #pragma once
 // The early Reproductor row hook: a chained IAT hook on the exe's own DDRAW.dll!DirectDrawCreate
-// import (S5 fix). DllMain attaches it under the loader lock, so everything here is plain memory
+// import. DllMain attaches it under the loader lock, so everything here is plain memory
 // work: no module load, no export lookup, no allocation and no log call. The pieces are split out of
 // dsound_proxy.cpp so the unit test can run them against a synthetic in-memory import table.
 #include <windows.h>

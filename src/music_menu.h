@@ -360,7 +360,7 @@ MusicMenuRowGate DecideMusicMenuRowGate(MusicMenuRowAction action, bool register
                                        const MusicMenuRowLogState& log,
                                        MusicMenuRowFailure failure = MusicMenuRowFailure::None);
 
-// S5 fix: which row serves the graphics menu once the DirectSoundCreate binding has run. An early
+// Which row serves the graphics menu once the DirectSoundCreate binding has run. An early
 // API row is live only while the general mod still relocates the menu (PENDING or APPLIED). When the
 // general mod reports NOT_USED or FAILED, the API row is never used: the in-place fallback row takes
 // over, and the early registration must not add a second row (the API row stays registered but dead).
@@ -373,12 +373,39 @@ enum class MusicMenuRowOwner {
 MusicMenuRowOwner DecideMusicMenuRowOwner(int32_t menuState, bool apiRowRegistered,
                                           bool inPlaceInstalled);
 
-// Review fix: the API row registration (early, at DirectDrawCreate, while the menu state is UNKNOWN
-// or PENDING) also registers the item text provider. When the general mod later reports NOT_USED or
-// FAILED, or APPLIED without its item-text detour, the provider must be cleared (registered as null)
-// before the in-place fallback takes the row and the item text, so no stale provider stays live.
+// The API row registration (early, at DirectDrawCreate, while the menu state is UNKNOWN or PENDING)
+// also registers the item text provider. When the general mod later reports NOT_USED or FAILED, or
+// APPLIED without its item-text detour, the provider must be cleared (registered as null) before the
+// in-place fallback takes the row and the item text, so no stale provider stays live.
 bool ShouldClearMusicItemTextProvider(bool providerRegistered, int32_t menuState,
                                       bool itemTextDetourInstalled);
+
+// The item text provider registered with the API row. It counts as registered until the general mod
+// accepts the clear, so a refused clear is retried at the next binding decision, and the refusal is
+// logged once however many retries it takes.
+struct MusicItemTextProviderState {
+    bool registered = false;
+    bool refusalLogged = false;
+};
+
+enum class MusicItemTextProviderClear {
+    Kept = 0,    // nothing to clear: no provider, no API table, or the API row is still the live one
+    Cleared = 1, // registerItemTextProvider(nullptr, nullptr) answered RR95_STATUS_OK
+    Refused = 2  // the general mod refused the clear: the provider stays registered and is retried
+};
+
+struct MusicItemTextProviderClearResult {
+    MusicItemTextProviderClear outcome = MusicItemTextProviderClear::Kept;
+    int32_t status = RR95_STATUS_OK;  // the answer of the clear call
+    bool log = false;                 // write this outcome now: the clear, or the first refusal
+};
+
+// Clears a stale provider. menuState and itemTextDetourInstalled are the BindingInputs the binding
+// decision was computed from, never a fresh read of the API, so the clear always agrees with the
+// fallback install that the same decision drives.
+MusicItemTextProviderClearResult ClearStaleMusicItemTextProvider(MusicItemTextProviderState& state,
+                                                                 const RR95ModApi* api, int32_t menuState,
+                                                                 bool itemTextDetourInstalled);
 
 // ---------------------------------------------------------------------------
 // In-place graphics menu row (S4)

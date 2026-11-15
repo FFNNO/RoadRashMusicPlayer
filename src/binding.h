@@ -81,7 +81,7 @@ struct ApiTableCheck {
 ApiTableCheck ValidateModApiTable(const RR95ModApi* api);
 const char* ApiTableProblemToString(ApiTableProblem problem);
 
-// S5 fix: the Reproductor row must be registered before the general mod installs its hooks and
+// The Reproductor row must be registered before the general mod installs its hooks and
 // builds the relocated graphics menu. That happens at the general mod's DirectDrawCreate, which the
 // game calls during the intro about 11 s before the first DirectSoundCreate, so the binding point is
 // the music mod's own chained IAT hook on the exe's DDRAW.dll!DirectDrawCreate import. The hook
