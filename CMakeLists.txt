@@ -58,3 +58,18 @@ target_compile_options(dsound PRIVATE ${RRMP_COMMON_OPTIONS})
 target_compile_definitions(dsound PRIVATE ${RRMP_COMMON_DEFINITIONS})
 target_link_libraries(dsound PRIVATE bcrypt ole32)
 target_link_options(dsound PRIVATE /IGNORE:4104 /IGNORE:4222)
+
+# Unit test: binding decision, [Music] ini, player, menu, overlay, exports -----
+add_executable(music_test
+  tests/music_test.cpp
+  ${RRMP_PLAYER_SOURCES}
+)
+target_compile_options(music_test PRIVATE ${RRMP_COMMON_OPTIONS})
+target_compile_definitions(music_test PRIVATE ${RRMP_COMMON_DEFINITIONS}
+  RR95_MUSIC_PROXY_PATH=L"$<TARGET_FILE:dsound>")
+target_link_libraries(music_test PRIVATE ole32)
+add_dependencies(music_test dsound)
+target_link_options(music_test PRIVATE /INCREMENTAL:NO)
+
+enable_testing()
+add_test(NAME music_test COMMAND music_test)
