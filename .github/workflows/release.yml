@@ -146,7 +146,7 @@ jobs:
           - RoadRashMusicPlayer-Setup-${env:VERSION}.exe finds your Steam copy of the game and installs dsound.dll, rr95music.ini (only when missing) and the music folder.
           - RoadRashMusicPlayer-${env:VERSION}.zip is the manual install: copy dsound.dll next to RoadRash95.exe.
 
-          The general mod Road Rash FFNNO Patch is optional; to run both together it must be v0.1.4 or later.
+          The player is a standalone mod and needs no other mod. Running it next to mods that patch the same game code (for example Road Rash FFNNO Patch) is experimental: set OtherModsCompat=1 in rr95music.ini (see the README).
 
           Built by GitHub Actions from commit ${env:GITHUB_SHA} ([build log](${env:GITHUB_SERVER_URL}/${env:GITHUB_REPOSITORY}/actions/runs/${env:GITHUB_RUN_ID})).
 
