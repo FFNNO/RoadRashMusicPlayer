@@ -3,6 +3,9 @@
 [![Descargar](https://img.shields.io/github/v/release/FFNNO/RoadRashMusicPlayer?label=Descargar&style=for-the-badge)](https://github.com/FFNNO/RoadRashMusicPlayer/releases/latest)
 [![Build](https://img.shields.io/github/actions/workflow/status/FFNNO/RoadRashMusicPlayer/release.yml?branch=main&style=for-the-badge)](https://github.com/FFNNO/RoadRashMusicPlayer/actions/workflows/release.yml)
 
+[![Twitter/X @PagaTeamDev](https://img.shields.io/badge/X-%40PagaTeamDev-000000?logo=x&style=for-the-badge)](https://x.com/PagaTeamDev)
+[![Donar en Cafecito](https://img.shields.io/badge/Donar-Cafecito-0ea5e9?logo=buymeacoffee&logoColor=white&style=for-the-badge)](https://cafecito.app/pagateam)
+
 [Read in English](README.md)
 
 Reproductor de música integrado en **Road Rash 95** (Windows, versión de Steam). La música propia se coloca en una carpeta y el juego la reproduce en carreras y menús, con teclas rápidas, una fila `Reproductor` en el menú de opciones del juego y un panel en pantalla, el "beeper", que muestra el casete y la pista.

@@ -3,6 +3,9 @@
 [![Download](https://img.shields.io/github/v/release/FFNNO/RoadRashMusicPlayer?label=Download&style=for-the-badge)](https://github.com/FFNNO/RoadRashMusicPlayer/releases/latest)
 [![Build](https://img.shields.io/github/actions/workflow/status/FFNNO/RoadRashMusicPlayer/release.yml?branch=main&style=for-the-badge)](https://github.com/FFNNO/RoadRashMusicPlayer/actions/workflows/release.yml)
 
+[![Twitter/X @PagaTeamDev](https://img.shields.io/badge/X-%40PagaTeamDev-000000?logo=x&style=for-the-badge)](https://x.com/PagaTeamDev)
+[![Donate on Cafecito](https://img.shields.io/badge/Donate-Cafecito-0ea5e9?logo=buymeacoffee&logoColor=white&style=for-the-badge)](https://cafecito.app/pagateam)
+
 [Leer en español](README.es.md)
 
 An in-game music player for **Road Rash 95** (Windows, the Steam release). Put your own music in a folder, and the game plays it in races and menus, with hotkeys, a `Reproductor` row in the game's options menu and an on-screen "beeper" panel that shows the cassette and the track.
