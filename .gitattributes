@@ -1,0 +1,13 @@
+# Line endings: LF for sources and docs, CRLF for Windows batch files.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.iss text eol=crlf
+
+# Binary assets
+*.bmp binary
+*.ico binary
+*.png binary
+
+# Vendored third-party code is kept byte for byte as upstream ships it.
+third_party/** -text
